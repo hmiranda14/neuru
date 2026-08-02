@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>NEURU Knob</title>
+<style>
+  body{ font-family:'Segoe UI',Tahoma,sans-serif; background:#2d2d2d; color:#d8d8d8; margin:0; padding:14px; font-size:13px; }
+  h3{ margin:2px 0 10px; font-size:12px; text-transform:uppercase; letter-spacing:1px; color:#7fb2ff; }
+  .fld{ margin-bottom:12px; }
+  label{ display:block; margin-bottom:4px; color:#9aa; font-size:11px; }
+  input,select{ width:100%; box-sizing:border-box; background:#1e1e1e; border:1px solid #444; color:#eee; border-radius:6px; padding:8px; font-size:13px; }
+  .hint{ font-size:11px; color:#888; margin-top:4px; line-height:1.4; }
+</style>
+</head>
+<body>
+<div class="fld">
+  <h3>NEURU connection</h3>
+  <label>NEURU endpoint</label>
+  <input id="base" type="text" placeholder="http://YOUR-NEURU:8090" oninput="saveGlobal()">
+  <label style="margin-top:8px">API token</label>
+  <input id="token" type="text" placeholder="nvd_…" oninput="saveGlobal()">
+</div>
+<div class="fld">
+  <h3>This knob controls</h3>
+  <label>Knob slot (matches NEURU → Knob Assignments)</label>
+  <select id="knob" onchange="saveKnob()">
+    <option value="0">Knob 1</option><option value="1">Knob 2</option>
+    <option value="2">Knob 3</option><option value="3">Knob 4</option>
+  </select>
+  <div class="hint">The action (TDP / Audio / Node) for each slot is set in NEURU → Stream Decks → Knob Assignments. Rotate = adjust, press = toggle/mute.</div>
+</div>
+<script>
+let ws=null, uuid=null, actionInfo=null, GLOBAL={base:'',token:''};
+function connectElgatoStreamDeckSocket(port, inUUID, registerEvent, info, inActionInfo){
+  uuid=inUUID; try{ actionInfo=JSON.parse(inActionInfo);}catch(e){ actionInfo=inActionInfo; }
+  const k=(actionInfo&&actionInfo.payload&&actionInfo.payload.settings&&actionInfo.payload.settings.knob);
+  if(k!==undefined&&k!==null) document.getElementById('knob').value=String(k);
+  ws=new WebSocket('ws://127.0.0.1:'+port);
+  ws.onopen=()=>{ ws.send(JSON.stringify({event:registerEvent, uuid:inUUID})); ws.send(JSON.stringify({event:'getGlobalSettings', context:inUUID})); };
+  ws.onmessage=(e)=>{ const m=JSON.parse(e.data); if(m.event==='didReceiveGlobalSettings'){ const s=m.payload.settings||{}; GLOBAL.base=s.base||''; GLOBAL.token=s.token||''; document.getElementById('base').value=GLOBAL.base; document.getElementById('token').value=GLOBAL.token; } };
+}
+window.connectStreamDockSocket=connectElgatoStreamDeckSocket;
+function send(o){ if(ws&&ws.readyState===1) ws.send(JSON.stringify(o)); }
+function saveGlobal(){ GLOBAL.base=document.getElementById('base').value.trim(); GLOBAL.token=document.getElementById('token').value.trim(); send({event:'setGlobalSettings', context:uuid, payload:GLOBAL}); }
+function saveKnob(){ if(actionInfo&&actionInfo.context) send({event:'setSettings', context:actionInfo.context, payload:{knob:parseInt(document.getElementById('knob').value,10)}}); }
+</script>
+</body>
+</html>

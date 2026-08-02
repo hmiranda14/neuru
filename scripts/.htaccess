@@ -1,0 +1,3 @@
+# NetMon — the scripts/ directory holds Python pollers with embedded DB
+# credentials. It must NEVER be reachable over HTTP. Deny everything.
+Require all denied

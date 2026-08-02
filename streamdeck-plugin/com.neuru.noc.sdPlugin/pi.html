@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>NEURU Tile</title>
+<style>
+  body{ font-family:'Segoe UI',Tahoma,sans-serif; background:#2d2d2d; color:#d8d8d8; margin:0; padding:14px; font-size:13px; }
+  h3{ margin:2px 0 10px; font-size:12px; text-transform:uppercase; letter-spacing:1px; color:#7fb2ff; }
+  .fld{ margin-bottom:12px; }
+  label{ display:block; margin-bottom:4px; color:#9aa; font-size:11px; }
+  input,select{ width:100%; box-sizing:border-box; background:#1e1e1e; border:1px solid #444; color:#eee; border-radius:6px; padding:8px; font-size:13px; }
+  input:focus,select:focus{ outline:none; border-color:#4da3ff; }
+  .hint{ font-size:11px; color:#888; margin-top:4px; line-height:1.4; }
+  .row{ display:flex; gap:8px; align-items:center; }
+  .dot{ width:9px; height:9px; border-radius:50%; background:#e74c3c; display:inline-block; }
+  .dot.ok{ background:#22e08a; }
+</style>
+</head>
+<body>
+<div class="fld">
+  <h3>NEURU connection</h3>
+  <div class="row" style="margin-bottom:6px"><span class="dot" id="dot"></span><span id="status" style="font-size:11px;color:#9aa">not connected</span></div>
+  <label>NEURU endpoint (HTTP, e.g. http://192.168.0.25:8090)</label>
+  <input id="base" type="text" placeholder="http://YOUR-NEURU:8090" oninput="saveGlobal()">
+  <label style="margin-top:8px">API token</label>
+  <input id="token" type="text" placeholder="nvd_…" oninput="saveGlobal()">
+  <div class="hint">Copy both from NEURU → Site Configuration → Stream Decks → Connection.</div>
+</div>
+<div class="fld">
+  <h3>Monitor (device)</h3>
+  <select id="tgt" onchange="onTarget()"><option value="">— connect first —</option></select>
+  <div class="hint">A PC (full telemetry), a network device / router (status), or the whole NOC. Each tile can watch a different one → make a scene per device.</div>
+</div>
+<div class="fld">
+  <h3>This tile shows</h3>
+  <select id="key" onchange="saveKey()"><option value="">— pick —</option></select>
+  <div class="hint">Metrics render a live color-state gauge; actions run a one-touch fix; shortcuts open a NEURU page.</div>
+</div>
+
+<script>
+let ws=null, uuid=null, actionInfo=null, GLOBAL={base:'',token:''}, curKey='', curTgt='', CAT={}, RIGS=[], NODES=[], DEFRIG=0;
+function esc(s){ return String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+function connectElgatoStreamDeckSocket(port, inUUID, registerEvent, info, inActionInfo){
+  uuid=inUUID; try{ actionInfo=JSON.parse(inActionInfo);}catch(e){ actionInfo=inActionInfo; }
+  const s=(actionInfo&&actionInfo.payload&&actionInfo.payload.settings)||{};
+  curKey=s.key||''; curTgt=s.tgt||'';
+  ws=new WebSocket('ws://127.0.0.1:'+port);
+  ws.onopen=()=>{ ws.send(JSON.stringify({event:registerEvent, uuid:inUUID})); ws.send(JSON.stringify({event:'getGlobalSettings', context:inUUID})); };
+  ws.onmessage=(e)=>{ const m=JSON.parse(e.data); if(m.event==='didReceiveGlobalSettings'){ const g=m.payload.settings||{}; GLOBAL.base=g.base||''; GLOBAL.token=g.token||''; document.getElementById('base').value=GLOBAL.base; document.getElementById('token').value=GLOBAL.token; loadCatalog(); } };
+}
+window.connectStreamDockSocket=connectElgatoStreamDeckSocket;
+function send(o){ if(ws&&ws.readyState===1) ws.send(JSON.stringify(o)); }
+function piBase(){ return GLOBAL.base.replace(/\/+$/,'').replace(/\/stream_decks\.php$/i,''); }
+function saveGlobal(){ GLOBAL.base=document.getElementById('base').value.trim(); GLOBAL.token=document.getElementById('token').value.trim();
+  send({event:'setGlobalSettings', context:uuid, payload:GLOBAL}); loadCatalog(); }
+
+async function loadCatalog(){
+  const st=document.getElementById('status'), dot=document.getElementById('dot');
+  if(!GLOBAL.base){ st.textContent='enter endpoint + token'; dot.className='dot'; return; }
+  try{
+    const url=piBase()+'/stream_decks.php?api=ping';   // token-gated → catalog + rigs + nodes
+    const r=await fetch(url+'&token='+encodeURIComponent(GLOBAL.token),{headers:{'X-NEURU-DECK':GLOBAL.token}});
+    const j=await r.json();
+    if(!j||!j.ok){ st.textContent='connected, but denied — check token'; dot.className='dot'; return; }
+    st.textContent='connected ✓'; dot.className='dot ok';
+    CAT=j.catalog||{}; RIGS=j.rigs||[]; NODES=j.nodes||[]; DEFRIG=j.default_rig||0;
+    if(!curTgt) curTgt = DEFRIG ? ('r'+DEFRIG) : '';
+    buildTargets(); await buildMetrics();
+  }catch(e){ st.textContent='cannot reach NEURU ('+e.message+')'; dot.className='dot'; }
+}
+function buildTargets(){
+  const sel=document.getElementById('tgt');
+  let h='<optgroup label="NEURU"><option value="" '+(curTgt===''?'selected':'')+'>Whole NOC</option></optgroup>';
+  if(RIGS.length){ h+='<optgroup label="PCs (full telemetry)">'; for(const r of RIGS) h+=`<option value="r${r.id}" ${('r'+r.id)===curTgt?'selected':''}>${esc(r.name)}</option>`; h+='</optgroup>'; }
+  if(NODES.length){ h+='<optgroup label="Devices / routers (status)">'; for(const n of NODES) h+=`<option value="n${n.id}" ${('n'+n.id)===curTgt?'selected':''}>${esc(n.name)}</option>`; h+='</optgroup>'; }
+  sel.innerHTML=h; sel.value=curTgt;
+}
+function targetType(){ const c=(curTgt||'').charAt(0); return c==='r'?'rig':(c==='n'?'node':'noc'); }
+async function buildMetrics(){
+  const sel=document.getElementById('key'); const tt=targetType();
+  let html='<option value="">— none —</option>';
+  const navOpts=()=>{ let s='<optgroup label="Command centers">'; for(const k in CAT){ if(CAT[k].kind==='nav') s+=`<option value="${k}" ${k===curKey?'selected':''}>${esc(CAT[k].label)}</option>`; } return s+'</optgroup>'; };
+  if(tt==='node'){
+    // DYNAMIC: fetch this device's real metrics (device_stats / traffic / status)
+    let mets=[];
+    try{ const r=await fetch(piBase()+'/stream_decks.php?api=node_metrics&node='+encodeURIComponent(curTgt.slice(1))+'&token='+encodeURIComponent(GLOBAL.token)); const j=await r.json(); if(j&&j.ok) mets=j.metrics||[]; }catch(e){}
+    if(curKey && mets.every(m=>m.key!==curKey)) curKey='';
+    html+='<optgroup label="Device metrics">';
+    for(const m of mets) html+=`<option value="${esc(m.key)}" ${m.key===curKey?'selected':''}>${esc(m.label)}${m.unit?(' ('+esc(m.unit)+')'):''}</option>`;
+    html+='</optgroup>'+navOpts();
+    sel.innerHTML=html; return;
+  }
+  // rig / NOC → fixed catalog
+  const okSrc = tt==='rig' ? ['pc','pc_slow'] : ['noc'];
+  const groups={metric:[],action:[],nav:[]};
+  for(const k in CAT){ const c=CAT[k];
+    if(c.kind==='metric'){ if(okSrc.indexOf(c.src)>=0) groups.metric.push([k,c.label,c.unit]); }
+    else if(c.kind==='action'){ if(tt==='rig') groups.action.push([k,c.label]); }   // one-touch fixes run on a PC
+    else if(c.kind==='nav'){ groups.nav.push([k,c.label]); }
+  }
+  if(curKey && (!CAT[curKey] || (CAT[curKey].kind==='metric' && okSrc.indexOf(CAT[curKey].src)<0) || (CAT[curKey].kind==='action' && tt!=='rig'))) curKey='';
+  const titles={metric:'Metrics',action:'One-touch actions',nav:'Command centers'};
+  for(const g of ['metric','action','nav']){ if(!groups[g].length)continue; html+=`<optgroup label="${titles[g]}">`; for(const it of groups[g]){ const k=it[0],l=it[1],u=it[2]; html+=`<option value="${k}" ${k===curKey?'selected':''}>${esc(l)}${u?(' ('+esc(u)+')'):''}</option>`; } html+='</optgroup>'; }
+  sel.innerHTML=html;
+}
+async function onTarget(){ curTgt=document.getElementById('tgt').value; await buildMetrics(); saveKey(); }
+function piLog(m){ try{ if(GLOBAL.base) fetch(piBase()+'/stream_decks.php?api=plog&m='+encodeURIComponent(m)+'&token='+encodeURIComponent(GLOBAL.token)); }catch(e){} }
+function saveKey(){ curKey=document.getElementById('key').value;
+  if(actionInfo&&actionInfo.context){
+    send({event:'setSettings', context:actionInfo.context, payload:{key:curKey, tgt:curTgt}});
+    // NEURU bridge: record ctx→{key,tgt} so the plugin backend resolves it (this build doesn't deliver setSettings to the plugin)
+    try{ fetch(piBase()+'/stream_decks.php?api=bind&ctx='+encodeURIComponent(actionInfo.context)+'&key='+encodeURIComponent(curKey)+'&tgt='+encodeURIComponent(curTgt)+'&token='+encodeURIComponent(GLOBAL.token)); }catch(e){}
+    paintFromPI();
+    piLog('PI saveKey ctx='+String(actionInfo.context).slice(-5)+' key='+curKey+' tgt='+curTgt);
+  } }
+async function paintFromPI(){
+  if(!actionInfo||!actionInfo.context||!GLOBAL.base||!curKey) return;
+  const url=piBase()+'/stream_decks.php?api=render&enc=datauri&key='+encodeURIComponent(curKey)+(curTgt?'&tgt='+encodeURIComponent(curTgt):'')+'&token='+encodeURIComponent(GLOBAL.token)+'&_='+Date.now();
+  try{ const r=await fetch(url); const du=(await r.text()).trim(); if(du.slice(0,10)==='data:image') send({event:'setImage', context:actionInfo.context, payload:{image:du, target:0}}); }catch(e){}
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,66 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# NEURU — .gitignore. Keeps EVERY secret + per-install state + the monetization
+# backend OUT of the public repo. Ship the *.tpl templates instead of real config.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── Per-install secrets & identity — NEVER commit ──
+.nm_secret.key
+.nm_secret.key.*
+.nm_install_id
+.nm_tls/
+*.key
+*.pem
+*.crt
+*.p12
+
+# ── Real runtime config (the .tpl / .sample templates ARE committed) ──
+connection.php
+connection-users.php
+net_mon_config_local.php
+nm_config.php
+.env
+*.env
+!*.tpl
+!*.sample
+!*.example
+
+# ── Monetization backend — NOT part of the open-source app ──
+licenseportal/
+
+# ── Runtime / generated state (keep the .htaccess placeholders) ──
+uploads/*
+!uploads/.htaccess
+logs/*
+!logs/.htaccess
+updates/*
+!updates/.htaccess
+wg/*
+!wg/.htaccess
+backups/
+models/
+*.log
+
+# ── Build artifacts / editor / junk ──
+*.tar
+*.tar.gz
+*.zip
+*.bak
+*.bak-*
+*.swp
+*.orig
+__pycache__/
+*.pyc
+node_modules/
+.DS_Store
+0
+
+# ── Local tooling / git-rebuild backups ──
+.claude/
+.git.old*
+sisportal/
+
+# ── Internal dev/ops docs — NOT for the public repo (contain server IPs, tokens,
+#    strategy). Curate + sanitize before publishing any of these. ──
+NEURU_HANDOFF.md
+CLAUDE.md
+docs/

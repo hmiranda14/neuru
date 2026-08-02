@@ -1,0 +1,66 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# NetMon — web hardening (.htaccess). Apache 2.4 syntax. AllowOverride All.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# No directory listings
+Options -Indexes
+
+# ── Deny direct HTTP access to PHP includes / config files ────────────────────
+# These are include()d by the app at the filesystem level (unaffected), but must
+# not be requestable directly over the web.
+<FilesMatch "^(connection|connection-users|nm_config|logger|access_control|check|nm_audit|nm_lnms|nm_graylog|nm_n8n|nm_secrets|nm_portainer|nm_solutionkb|nm_fixflow|nm_chrome|nm_netstats|nm_smokeping)\.php$">
+    Require all denied
+</FilesMatch>
+
+# ── Deny direct access to sensitive file types ────────────────────────────────
+<FilesMatch "\.(py|pyc|tpl|sql|sh|log|bak|inc|ini|json|env|md|sample|dist)$">
+    Require all denied
+</FilesMatch>
+
+# Block dotfiles (e.g. .htaccess, .git) from being served
+<FilesMatch "^\.">
+    Require all denied
+</FilesMatch>
+
+# ── Federated-embed detection ─────────────────────────────────────────────────
+# A federated device view (master embedding a slave's native page) carries a
+# short-lived HMAC token as ?fed_sig=… . Flag those requests so the anti-framing
+# headers below can allow ONLY them to be embedded. The page CONTENT is still gated
+# by validating that token in PHP (check.php) — a bogus fed_sig just gets the
+# "not authorized" page, so relaxing the frame header here leaks nothing.
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+    RewriteCond %{QUERY_STRING} (^|&)fed_sig= [NC]
+    RewriteRule ^ - [E=NM_FED_EMBED:1]
+</IfModule>
+
+# ── Security response headers ─────────────────────────────────────────────────
+<IfModule mod_headers.c>
+    Header always set X-Content-Type-Options "nosniff"
+    Header always set Referrer-Policy "strict-origin-when-cross-origin"
+    Header always set X-XSS-Protection "1; mode=block"
+
+    # NORMAL pages — block framing entirely (SAMEORIGIN + frame-ancestors 'self').
+    Header always set X-Frame-Options "SAMEORIGIN" env=!NM_FED_EMBED
+    Header always set Content-Security-Policy "default-src 'self'; img-src 'self' data: https://*.basemaps.cartocdn.com; style-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com; font-src 'self' https://cdnjs.cloudflare.com; script-src 'self' 'unsafe-inline'; media-src 'self'; object-src 'none'; frame-src 'self' http: https:; frame-ancestors 'self'" env=!NM_FED_EMBED
+
+    # FEDERATED EMBED — allow the master to frame this page (no X-Frame-Options; CSP
+    # frame-ancestors relaxed). Content stays HMAC-gated in PHP.
+    Header always set Content-Security-Policy "default-src 'self'; img-src 'self' data: https://*.basemaps.cartocdn.com; style-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com; font-src 'self' https://cdnjs.cloudflare.com; script-src 'self' 'unsafe-inline'; media-src 'self'; object-src 'none'; frame-src 'self' http: https:; frame-ancestors *" env=NM_FED_EMBED
+
+    # VOICE (AI Commander VAPI) — voice.php ONLY. The VAPI Web SDK runs Daily.co (WebRTC):
+    # it loads a call-machine script/iframe from *.daily.co and opens signaling/media to
+    # *.vapi.ai + *.daily.co. The strict global CSP would block all of that, so this ONE page
+    # gets a scoped relaxation (declared LAST → its `set` replaces the strict one for this URI).
+    # SetEnvIf tags the request; the rest of the portal is untouched.
+    SetEnvIf Request_URI "voice\.php" NM_VOICE
+    # NOTE: Daily.co's WebRTC call-machine uses new Function()/WASM → needs 'unsafe-eval'
+    # (scoped to voice.php only). connect-src is wide open to the vapi.ai/daily.co families for
+    # signaling + TURN/STUN media; add *.wss.daily.co + gs/b/c subdomains via the *.daily.co wildcard.
+    Header always set Content-Security-Policy "default-src 'self'; img-src 'self' data: blob: https://*.daily.co; style-src 'self' 'unsafe-inline'; font-src 'self' data:; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob: https://*.daily.co; worker-src 'self' blob:; child-src 'self' blob: https://*.daily.co; media-src 'self' blob: mediastream:; connect-src 'self' https://*.vapi.ai wss://*.vapi.ai https://*.daily.co wss://*.daily.co blob: data:; frame-src 'self' https://*.daily.co; object-src 'none'; frame-ancestors 'self'" env=NM_VOICE
+
+    # VISION (Local Vision presence) — vision.php ONLY. face-api.js/TF.js need blob: workers + wasm eval; the
+    # camera stays LOCAL (getUserMedia → mediastream), only a tiny presence JSON is POSTed (connect-src 'self').
+    SetEnvIf Request_URI "vision\.php" NM_VISION
+    Header always set Content-Security-Policy "default-src 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval' blob:; worker-src 'self' blob:; media-src 'self' blob: mediastream:; connect-src 'self' blob: data:; object-src 'none'; frame-ancestors 'self'" env=NM_VISION
+</IfModule>

@@ -1,0 +1,39 @@
+{
+  "SDKVersion": 2,
+  "Author": "NEURU",
+  "Name": "NEURU NOC",
+  "Description": "Turn your Stream Dock into a physical NOC — live telemetry, one-touch fixes and knob controls, driven by your NEURU over the LAN. Button faces are rendered by NEURU (cyberpunk, color-state).",
+  "Category": "NEURU NOC",
+  "CategoryIcon": "assets/category",
+  "Icon": "assets/category",
+  "URL": "https://neurunetpr.com",
+  "Version": "1.0.0",
+  "CodePath": "app.html",
+  "PropertyInspectorPath": "pi.html",
+  "DefaultWindowSize": [500, 650],
+  "Software": { "MinimumVersion": "5.0" },
+  "OS": [
+    { "Platform": "windows", "MinimumVersion": "10" },
+    { "Platform": "mac", "MinimumVersion": "10.15" }
+  ],
+  "Actions": [
+    {
+      "UUID": "com.neuru.noc.tile",
+      "Name": "NEURU Tile",
+      "Icon": "assets/action",
+      "Tooltip": "A NEURU metric gauge, one-touch action, or command-center shortcut. Rendered live by NEURU.",
+      "PropertyInspectorPath": "pi.html",
+      "Controllers": ["Keypad", "SecondaryScreen"],
+      "States": [{ "Image": "assets/key", "TitleAlignment": "bottom", "ShowTitle": false }]
+    },
+    {
+      "UUID": "com.neuru.noc.knob",
+      "Name": "NEURU Knob",
+      "Icon": "assets/action",
+      "Tooltip": "Show a live NEURU metric / action on a rotary-knob screen.",
+      "PropertyInspectorPath": "pi.html",
+      "Controllers": ["Knob"],
+      "States": [{ "Image": "assets/key", "TitleAlignment": "center", "ShowTitle": false }]
+    }
+  ]
+}
