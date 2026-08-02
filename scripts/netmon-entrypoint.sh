@@ -29,6 +29,26 @@ KEYF="$APP/.nm_secret.key"
 [ -s "$KEYF" ] || { head -c32 /dev/urandom | base64 > "$KEYF" && echo "[entrypoint] generated .nm_secret.key"; }
 chown www-data:www-data "$KEYF" 2>/dev/null; chmod 644 "$KEYF" 2>/dev/null
 
+# 0a0) DB CONNECTION files ($conn + $conn2). The app requires $APP/connection.php (main DB) and
+#      $APP/connection-users.php (a 2nd handle used by auth/audit). setup.php connects to the DB via
+#      env and imports the schema — but NOTHING writes these files, and the bind-mounted app dir is
+#      host-owned (not www-data) so PHP couldn't write them anyway. Result on a FRESH install: the
+#      files never exist → $conn/$conn2 are null → EVERY authenticated page 500s right after login
+#      ("Call to a member function prepare() on null"). We (root) generate them from the shipped .tpl
+#      templates on boot, filling DB params from env (defaults match the compose "db" service). An
+#      existing/custom connection.php is never overwritten.
+NM_DB_HOST="${NM_DB_HOST:-db}"; NM_DB_NAME="${NM_DB_NAME:-netmon}"
+NM_DB_USER="${NM_DB_USER:-sisuser}"; NM_DB_PASS="${NM_DB_PASS:-sispass}"
+for _cf in connection connection-users; do
+    _tpl="$APP/${_cf}.php.tpl"; _dst="$APP/${_cf}.php"
+    if [ ! -s "$_dst" ] && [ -f "$_tpl" ]; then
+        sed -e "s|__DB_HOST__|${NM_DB_HOST}|g" -e "s|__DB_NAME__|${NM_DB_NAME}|g" \
+            -e "s|__DB_USER__|${NM_DB_USER}|g" -e "s|__DB_PASS__|${NM_DB_PASS}|g" "$_tpl" > "$_dst" \
+            && echo "[entrypoint] generated ${_cf}.php from template (host=$NM_DB_HOST db=$NM_DB_NAME)"
+    fi
+    chown www-data:www-data "$_dst" 2>/dev/null; chmod 640 "$_dst" 2>/dev/null
+done
+
 # 0a2) LICENSE FINGERPRINT persistence: the license binds to a machine fingerprint. In Docker the
 #      raw signals (machine-id/MAC/hostname) change on every container recreate, which would flip
 #      the fingerprint and de-activate a valid license. We freeze it in $APP/.nm_install_id. Ensure

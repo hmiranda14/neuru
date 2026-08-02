@@ -308,10 +308,9 @@ function nm_lic_set_setting($conn, string $key, string $val): void {
 //                                     that hasn't activated; free requires activation)
 //  • enforcement ON + token         → the token's max_nodes (null = unlimited plan)
 function nm_lic_node_limit($conn): ?int {
-    if (!nm_lic_enforced($conn)) return null;
-    $s = nm_lic_state($conn);
-    if (empty($s['valid'])) return null;
-    return $s['max_nodes'] === null ? null : (int)$s['max_nodes'];
+    // NEURU is free & open source — node limits are NEVER enforced (unlimited nodes, any OS).
+    // The Portal issues an unlimited license anyway; this hard-guarantees a node is never blocked.
+    return null;
 }
 function nm_lic_node_count($conn): int {
     if (!($conn instanceof mysqli)) return 0;

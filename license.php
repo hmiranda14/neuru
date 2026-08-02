@@ -108,6 +108,12 @@ label{display:block;font-size:10.5px;text-transform:uppercase;letter-spacing:.4p
     <button class="btn" onclick="load()"><i class="fa-solid fa-rotate"></i> Refresh</button>
   </div>
 
+  <!-- FREE LICENSE CTA -->
+  <div class="glass card" style="border:1px solid rgba(54,227,208,.35);background:rgba(54,227,208,.06)">
+    <b style="font-size:15px"><i class="fa-solid fa-unlock-keyhole" style="color:#36e3d0"></i> NEURU is free &amp; open source</b>
+    <div class="hint" style="margin-top:6px">Your license is <b>free, unlimited and never expires</b> (10 activations, any OS). Don't have one yet? Create a free account at <a href="https://neurunetpr.com" target="_blank" rel="noopener" style="color:#8bf3ff">neurunetpr.com</a> — <b>register</b>, then copy your key from <b>Licensing</b> in your portal account and paste it below. We only ever charge for optional AI usage. Source: <a href="https://github.com/hmiranda14/neuru" target="_blank" rel="noopener" style="color:#8bf3ff"><i class="fa-brands fa-github"></i> github.com/hmiranda14/neuru</a>.</div>
+  </div>
+
   <!-- STATUS -->
   <div class="glass card">
     <div class="hero-st">

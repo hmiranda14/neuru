@@ -94,6 +94,11 @@ html{ background:#03050b; } body{ margin:0; font-family:'Segoe UI',Tahoma,sans-s
       <div class="role" style="margin-bottom:10px">System Engineer</div>
       <div class="mail"><i class="fa-solid fa-envelope"></i> <a href="mailto:hectorm.miranda@gmail.com">hectorm.miranda@gmail.com</a></div>
       <div class="ver">PORTAL VERSION <?= NEURU_VERSION ?></div>
+      <div class="lic-line" style="margin-top:16px;font-size:13px;color:#9fb2c8;line-height:1.85;text-align:center">
+        <i class="fa-solid fa-scale-balanced" style="color:#8bf3ff"></i> Free &amp; open source · <b>GNU AGPL-3.0</b> license<br>
+        <i class="fa-brands fa-github" style="color:#8bf3ff"></i> <a href="https://github.com/hmiranda14/neuru" target="_blank" rel="noopener" style="color:#8bf3ff">github.com/hmiranda14/neuru</a><br>
+        <i class="fa-solid fa-globe" style="color:#8bf3ff"></i> Get your free license at <a href="https://neurunetpr.com" target="_blank" rel="noopener" style="color:#8bf3ff">neurunetpr.com</a>
+      </div>
     </div>
 
     <div class="block" style="margin-bottom:8vh">
