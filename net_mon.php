@@ -753,7 +753,7 @@ if (empty($videoFile)) $videoFile = !empty($_SESSION['user_bgsite_video']) ? $_S
     <!-- defer: 251KB of charting only needed when a graph is opened — must NOT block the body/loader -->
     <script defer src="/chart.umd.min.js"></script>
     <script defer src="/chartjs-adapter-date-fns.bundle.min.js"></script>
-    <?= nm_tz_js() ?>
+    <?= function_exists('nm_tz_js') ? nm_tz_js() : '' ?>
     <style>
         /* ── Base (matches dev_tools.php) ────────────────────────────────────── */
         :root {

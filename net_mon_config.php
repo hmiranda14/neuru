@@ -2068,10 +2068,9 @@ input:checked+.toggle-slider::before{transform:translateX(20px);}
 <?php if (isset($_GET['lic_block'])): $__lv = nm_lic_can_add_nodes($conn, 0); ?>
 <div style="background:rgba(240,169,44,.12);border:1px solid rgba(240,169,44,.45);color:#ffd98a;border-radius:10px;padding:12px 16px;margin-bottom:14px;font-size:13px;">
   <i class="fas fa-triangle-exclamation"></i>
-  <b>Node not added — license limit reached.</b>
-  This NEURU license allows <b><?= (int)$__lv['limit'] ?></b> node<?= (int)$__lv['limit']===1?'':'s' ?>
-  and <b><?= (int)$__lv['current'] ?></b> are configured.
-  Upgrade in <a href="license.php" style="color:#ffe6ad;">Site Configuration → Licensing</a>, or turn off enforcement.
+  <b>NEURU is free &amp; open source.</b>
+  Unlimited nodes, no limits — add as many as you like.
+  Manage your free license in <a href="license.php" style="color:#ffe6ad;">Site Configuration → Licensing</a>.
 </div>
 <?php endif; ?>
 <div class="two-col">

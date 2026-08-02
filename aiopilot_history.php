@@ -94,7 +94,7 @@ body{ margin:0; font-family:'Segoe UI',Tahoma,sans-serif; background:transparent
 <div id="list"><div class="muted" style="padding:20px;">Loading…</div></div>
 </div>
 <script src="/nm_netbg.js"></script>
-<?= nm_tz_js() ?>
+<?= function_exists('nm_tz_js') ? nm_tz_js() : '' ?>
 <script>
 const esc=s=>(s==null?'':String(s)).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 // full date+time in the configured display tz (app_timezone); stored values are UTC

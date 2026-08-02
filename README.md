@@ -4,6 +4,17 @@
   Free. Open source. Yours to run.</p>
 </p>
 
+<p align="center">
+  <a href="LICENSE"><img alt="License: AGPL-3.0" src="https://img.shields.io/badge/license-AGPL--3.0-8bf3ff.svg"></a>
+  <img alt="Free forever" src="https://img.shields.io/badge/price-free%20forever-2ee6a0.svg">
+  <a href="https://neurunetpr.com"><img alt="Get your free license" src="https://img.shields.io/badge/free%20license-neurunetpr.com-4da3ff.svg"></a>
+</p>
+
+> **100% free & open source.** Run the entire platform on your own hardware with **unlimited nodes,
+> forever**. Create a free account at **[neurunetpr.com](https://neurunetpr.com)** to get your license
+> (and, optionally, hosted AI). The only thing ever metered is **AI usage** — and you can self-host
+> that too with your own key.
+
 ---
 
 NEURU is a flat-file **PHP 8.3 + MySQL 8 + Python + n8n** monitoring platform that aims to
@@ -23,7 +34,7 @@ your own infrastructure in Docker — your data never leaves your network.
 ## 🚀 Quick start (Docker)
 
 ```bash
-# 1) grab a release installer (or clone this repo)
+# 1) grab the free installer from https://neurunetpr.com (or clone this repo)
 tar xzf neuru-installer-v<version>.tar.gz && cd neuru-installer
 
 # 2) shared network + build + start
@@ -49,11 +60,22 @@ cp nm_config.php.tpl         nm_config.php           # app config
 Secrets (SSH keys, API tokens, Pi-hole/Telegram) are encrypted at rest with a per-install key
 (`.nm_secret.key`, auto-generated on first boot — never commit it).
 
-## 📄 License
+## 📄 License & pricing
 
-**GNU Affero General Public License v3.0 (AGPL-3.0).** NEURU is free to use, study, modify and
-share. If you run a modified version as a network service, you must make your source available to
-its users. See [`LICENSE`](LICENSE).
+NEURU is licensed under the **GNU Affero General Public License v3.0 (AGPL-3.0)** — see
+[`LICENSE`](LICENSE). It is **free to use, study, modify and share**. If you run a modified version as
+a network service, you must make your source available to its users.
+
+**Pricing is simple — the platform is free, forever:**
+
+| | |
+|---|---|
+| **NEURU Core** | Free · open source · **unlimited nodes** · no expiration · 10 activations · any OS |
+| **NEURU AI Flows** *(optional)* | Pay only for AI usage (metered per token) — or **bring your own key** (OpenAI / Claude / Ollama) and pay nothing |
+
+👉 **Get your free license** by creating an account at **[neurunetpr.com](https://neurunetpr.com)**
+(you can also download the installers there), then paste the key into **Site Configuration → Licensing**.
+Or just clone this repo and run it directly.
 
 ## 🤝 Contributing
 

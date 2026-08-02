@@ -427,7 +427,7 @@ body{ margin:0; font-family:'Segoe UI',Tahoma,sans-serif; background:transparent
 </div>
 
 <script src="/nm_netbg.js"></script>
-<?= nm_tz_js() ?>
+<?= function_exists('nm_tz_js') ? nm_tz_js() : '' ?>
 <script>
 const esc=s=>(s==null?'':String(s)).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 let FOCUS=0, _seenTop=null;

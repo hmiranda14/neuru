@@ -18,7 +18,8 @@ if (!function_exists('nm_lic_ensure')) {
 // Embedded PUBLIC verification key (base64 of the Ed25519 public key). Verify-only.
 define('NM_LIC_PUBKEY_B64', 'EkLumcl8KN20yjGo4oauq4GsqlpAsM9DqrsTvDPrGuY=');
 
-// Feature → minimum tier. This is the map that unlocks EXCLUSIVE paid features.
+// Feature → minimum tier. DEAD / reference only: NEURU is free & open source, so nm_feature()
+// always returns true and nothing is ever gated. Kept for historical context.
 // Add a feature here + call nm_feature($conn,'key') on its page to make it paid.
 // (Everything not listed is treated as 'free' / always available.)
 function nm_lic_feature_matrix(): array {
@@ -166,12 +167,10 @@ function nm_lic_active_tier($conn): string {
     return $s['valid'] ? $s['tier'] : 'free';
 }
 
-// THE GATE. Is $featureKey available under the current tier? Default-permissive.
+// THE GATE. NEURU is now free & open source — EVERY feature is unlocked, always. No tier gating.
+// (The feature→tier matrix is kept for reference only; nothing is ever blocked.)
 function nm_feature($conn, string $featureKey): bool {
-    $matrix = nm_lic_feature_matrix();
-    $need = $matrix[$featureKey] ?? 'free';   // unlisted features are always free
-    if ($need === 'free') return true;
-    return nm_lic_tier_rank(nm_lic_active_tier($conn)) >= nm_lic_tier_rank($need);
+    return true;
 }
 
 // Convenience for a paid page: return true if allowed, else render an upsell + stop.
@@ -328,10 +327,8 @@ function nm_lic_can_add_nodes($conn, int $n = 1): array {
 }
 // Human-friendly message when an add is blocked (reuse across node-add paths).
 function nm_lic_node_block_msg(array $verdict): string {
-    return 'License node limit reached — this NEURU license allows '
-        . (int)$verdict['limit'] . ' node' . ((int)$verdict['limit']===1?'':'s')
-        . ' and ' . (int)$verdict['current'] . ' are already configured. '
-        . 'Upgrade your license in Site Configuration → Licensing, or turn off enforcement.';
+    // Unreachable — NEURU is free & open source, node limits are never enforced (nm_lic_node_limit=null).
+    return 'NEURU is free & open source — unlimited nodes, no limits.';
 }
 
 // ── Badge state for the top-bar indicator (best-effort, cheap) ───────────────
