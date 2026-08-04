@@ -676,6 +676,55 @@ if (isset($_GET['api'])) {
             echo json_encode($pt['ok'] ? ['ok'=>true,'version'=>$pt['version'] ?? null] : ['ok'=>false,'err'=>$pt['error'] ?? 'failed']);
             break;
 
+        // ── AdGuard Home: list configured servers ─────────────────────────────
+        case 'adguard_list':
+            if (session_status()===PHP_SESSION_NONE) session_start();
+            include_once('connection.php');
+            if (empty($_SESSION['username'])) { echo json_encode(['ok'=>false,'err'=>'Unauthorized']); break; }
+            require_once __DIR__ . '/nm_adguard.php';
+            echo json_encode(['ok'=>true,'servers'=>nm_ag_servers($conn)]);
+            break;
+
+        // ── AdGuard Home: add / update one server (password encrypted, blank=keep) ──
+        case 'adguard_server_save':
+            if ($_SERVER['REQUEST_METHOD']!=='POST') { echo json_encode(['ok'=>false,'err'=>'POST required']); break; }
+            if (session_status()===PHP_SESSION_NONE) session_start();
+            include_once('connection.php');
+            if (empty($_SESSION['username'])) { echo json_encode(['ok'=>false,'err'=>'Unauthorized']); break; }
+            require_once __DIR__ . '/nm_adguard.php';
+            $r = nm_ag_server_save($conn, [
+                'id'       => (int)($_POST['id'] ?? 0),
+                'name'     => $_POST['name'] ?? '',
+                'url'      => $_POST['url'] ?? '',
+                'username' => $_POST['username'] ?? '',
+                'password' => $_POST['password'] ?? '',
+                'verify'   => !empty($_POST['verify_tls']) && $_POST['verify_tls']!=='0',
+                'enabled'  => !empty($_POST['enabled']) && $_POST['enabled']!=='0',
+            ]);
+            echo json_encode($r);
+            break;
+
+        // ── AdGuard Home: delete a server ─────────────────────────────────────
+        case 'adguard_server_delete':
+            if ($_SERVER['REQUEST_METHOD']!=='POST') { echo json_encode(['ok'=>false,'err'=>'POST required']); break; }
+            if (session_status()===PHP_SESSION_NONE) session_start();
+            include_once('connection.php');
+            if (empty($_SESSION['username'])) { echo json_encode(['ok'=>false,'err'=>'Unauthorized']); break; }
+            require_once __DIR__ . '/nm_adguard.php';
+            nm_ag_server_delete($conn, (int)($_POST['id'] ?? 0));
+            echo json_encode(['ok'=>true]);
+            break;
+
+        // ── AdGuard Home: auth + version probe for one server ─────────────────
+        case 'adguard_test':
+            if (session_status()===PHP_SESSION_NONE) session_start();
+            include_once('connection.php');
+            if (empty($_SESSION['username'])) { echo json_encode(['ok'=>false,'err'=>'Unauthorized']); break; }
+            require_once __DIR__ . '/nm_adguard.php';
+            $pt = nm_ag_test($conn, (int)($_GET['id'] ?? 0));
+            echo json_encode($pt['ok'] ? ['ok'=>true,'version'=>$pt['version'] ?? null] : ['ok'=>false,'err'=>$pt['error'] ?? 'failed']);
+            break;
+
         // ── NetFlow collector: save settings ───────────────────────────────────
         case 'netflow_save':
             if ($_SERVER['REQUEST_METHOD']!=='POST') { echo json_encode(['ok'=>false,'err'=>'POST required']); break; }
@@ -1564,6 +1613,8 @@ $_sp_thr = nm_sp_thresholds($conn)['global'];
 // Pi-hole servers (multi-instance; passwords never echoed back to the form)
 require_once __DIR__ . '/nm_pihole.php';
 $_ph_servers = nm_ph_servers($conn);
+require_once __DIR__ . '/nm_adguard.php';
+$_ag_servers = nm_ag_servers($conn);
 
 // NetFlow settings + live collector status
 require_once __DIR__ . '/nm_netflow.php';
@@ -3322,6 +3373,64 @@ if ($_SERVER['REQUEST_METHOD']==='POST' && ($_POST['action']??'')==='save_poller
     </form>
 </div>
 
+<!-- ── AdGuard Home (multi-instance) ──────────────────────────────────────── -->
+<div class="glass-card" style="border-color:rgba(103,178,121,.35);">
+    <h2 style="color:#67b279;"><i class="fas fa-shield-cat"></i> AdGuard Home <span style="font-size:11px;color:#666;font-weight:400;">— add one or more</span></h2>
+    <p style="font-size:11px;color:#888;margin:0 0 14px;">Pull DNS stats, top lists and the live query log from each AdGuard Home (<b>HTTP Basic</b> — the web-UI username + password, <b>no API key</b>).
+        NEURU proxies server-side — credentials stay encrypted and never reach the browser. Also a Collective Immunity target: blocked threat domains fan out here as <code>||domain^</code> user-rules. Switch between instances on the AdGuard page.</p>
+
+    <table class="dev-table" id="ag-table" style="margin-bottom:12px;"><thead><tr>
+        <th>Name</th><th>Address</th><th>TLS</th><th>Status</th><th style="text-align:right;">Actions</th>
+    </tr></thead><tbody id="ag-tbody">
+        <?php if (empty($_ag_servers)): ?>
+        <tr><td colspan="5" style="color:#888;text-align:center;padding:14px;">No AdGuard instances yet — add one below.</td></tr>
+        <?php else: foreach ($_ag_servers as $s): ?>
+        <tr data-id="<?= (int)$s['id'] ?>">
+            <td><b><?= htmlspecialchars($s['name']) ?></b></td>
+            <td class="mono" style="font-size:11px;"><?= htmlspecialchars($s['url']) ?></td>
+            <td><?= $s['verify'] ? 'verify' : '<span style="color:#888;">skip</span>' ?></td>
+            <td><span class="conn-status <?= $s['enabled']?($s['has_pw']?'conn-ok':'conn-unk'):'conn-off' ?>" style="padding:2px 8px;font-size:10px;">
+                <?= $s['enabled'] ? ($s['has_pw']?'enabled':'no password') : 'disabled' ?></span></td>
+            <td style="text-align:right;white-space:nowrap;">
+                <button class="btn btn-sm" title="Test" onclick="testAdguard(<?= (int)$s['id'] ?>,this)"><i class="fas fa-satellite-dish"></i></button>
+                <button class="btn btn-sm" title="Edit" onclick="editAdguard(<?= (int)$s['id'] ?>)"><i class="fas fa-pen"></i></button>
+                <button class="btn btn-sm btn-danger" title="Delete" onclick="deleteAdguard(<?= (int)$s['id'] ?>,'<?= htmlspecialchars(addslashes($s['name'])) ?>')"><i class="fas fa-trash"></i></button>
+            </td>
+        </tr>
+        <?php endforeach; endif; ?>
+    </tbody></table>
+
+    <div id="ag-status" class="conn-status conn-unk" style="margin-bottom:12px;display:none;">
+        <i class="fas fa-circle-question"></i> <span id="ag-status-text"></span>
+    </div>
+
+    <form id="ag-form" onsubmit="return false;" style="border-top:1px solid rgba(255,255,255,.06);padding-top:12px;">
+        <div style="font-size:11px;color:#888;margin-bottom:8px;"><b id="ag-form-title">Add an AdGuard Home</b></div>
+        <input type="hidden" id="ag-id" value="0">
+        <div style="display:flex;gap:10px;flex-wrap:wrap;">
+            <div class="form-row" style="flex:1;min-width:140px;"><label>Name</label>
+                <input class="form-input" type="text" id="ag-name" placeholder="AdGuard 1" autocomplete="off"></div>
+            <div class="form-row" style="flex:2;min-width:200px;"><label>Address <span style="color:#555;font-weight:400;">(scheme + host[:port], no /control)</span></label>
+                <input class="form-input" type="text" id="ag-url" placeholder="http://192.168.0.30:1221" autocomplete="off"></div>
+        </div>
+        <div style="display:flex;gap:10px;flex-wrap:wrap;">
+            <div class="form-row" style="flex:1;min-width:140px;"><label>Username</label>
+                <input class="form-input" type="text" id="ag-username" placeholder="admin" autocomplete="off"></div>
+            <div class="form-row" style="flex:1;min-width:140px;"><label>Password <span style="color:#555;font-weight:400;" id="ag-pw-hint">(required)</span></label>
+                <input class="form-input" type="password" id="ag-password" value="" placeholder="AdGuard admin password" autocomplete="new-password"></div>
+        </div>
+        <div style="display:flex;gap:18px;align-items:center;flex-wrap:wrap;margin-top:4px;">
+            <label style="display:flex;align-items:center;gap:8px;"><span class="toggle-switch"><input type="checkbox" id="ag-enabled" checked><span class="toggle-slider"></span></span><span style="font-size:12px;">Enabled</span></label>
+            <label style="display:flex;align-items:center;gap:8px;"><span class="toggle-switch"><input type="checkbox" id="ag-verify"><span class="toggle-slider"></span></span><span style="font-size:12px;color:#aaa;">Verify TLS <span style="color:#666;">(off for self-signed)</span></span></label>
+        </div>
+        <div style="display:flex;gap:8px;margin-top:14px;">
+            <button type="button" class="btn btn-success btn-sm" onclick="saveAdguard()"><i class="fas fa-floppy-disk"></i> <span id="ag-save-lbl">Add AdGuard</span></button>
+            <button type="button" class="btn btn-sm" id="ag-cancel" style="display:none;" onclick="resetAdguardForm()">Cancel</button>
+            <a class="btn btn-sm" href="adguard.php" style="margin-left:auto;"><i class="fas fa-arrow-up-right-from-square"></i> Open AdGuard</a>
+        </div>
+    </form>
+</div>
+
 </div><!-- /im-col --><div class="im-col">
 
 <!-- ── NetFlow Traffic Analyzer ─────────────────────────────────────────────── -->
@@ -4408,6 +4517,82 @@ async function deletePihole(id,name){
     const fd=new FormData(); fd.append('id',id);
     await fetch('net_mon_config.php?api=pihole_server_delete',{method:'POST',body:fd});
     reloadPiholes(); resetPiholeForm();
+}
+
+// ── AdGuard Home (mirrors the Pi-hole block; reuses _phEsc) ──────────────────
+let _agServers = [];
+function agStatus(cls,html){ const b=document.getElementById('ag-status'),t=document.getElementById('ag-status-text');
+    b.style.display='flex'; b.className='conn-status '+cls; t.innerHTML=html; }
+async function reloadAdguards(){
+    const r=await fetch('net_mon_config.php?api=adguard_list').then(r=>r.json()).catch(()=>({ok:false}));
+    if(!r.ok) return; _agServers=r.servers||[];
+    const tb=document.getElementById('ag-tbody');
+    tb.innerHTML = _agServers.length ? _agServers.map(s=>{
+        const st = s.enabled ? (s.has_pw?['conn-ok','enabled']:['conn-unk','no password']) : ['conn-off','disabled'];
+        return `<tr data-id="${s.id}">
+            <td><b>${_phEsc(s.name)}</b></td>
+            <td class="mono" style="font-size:11px;">${_phEsc(s.url)}</td>
+            <td>${s.verify?'verify':'<span style="color:#888;">skip</span>'}</td>
+            <td><span class="conn-status ${st[0]}" style="padding:2px 8px;font-size:10px;">${st[1]}</span></td>
+            <td style="text-align:right;white-space:nowrap;">
+                <button class="btn btn-sm" title="Test" onclick="testAdguard(${s.id},this)"><i class="fas fa-satellite-dish"></i></button>
+                <button class="btn btn-sm" title="Edit" onclick="editAdguard(${s.id})"><i class="fas fa-pen"></i></button>
+                <button class="btn btn-sm btn-danger" title="Delete" onclick="deleteAdguard(${s.id},'${_phEsc(s.name)}')"><i class="fas fa-trash"></i></button>
+            </td></tr>`;
+    }).join('') : '<tr><td colspan="5" style="color:#888;text-align:center;padding:14px;">No AdGuard instances yet — add one below.</td></tr>';
+}
+function resetAdguardForm(){
+    document.getElementById('ag-id').value='0';
+    document.getElementById('ag-name').value=''; document.getElementById('ag-url').value=''; document.getElementById('ag-username').value=''; document.getElementById('ag-password').value='';
+    document.getElementById('ag-enabled').checked=true; document.getElementById('ag-verify').checked=false;
+    document.getElementById('ag-form-title').textContent='Add an AdGuard Home';
+    document.getElementById('ag-save-lbl').textContent='Add AdGuard';
+    document.getElementById('ag-pw-hint').textContent='(required)';
+    document.getElementById('ag-cancel').style.display='none';
+    document.getElementById('ag-status').style.display='none';
+}
+async function editAdguard(id){
+    id=Number(id);
+    let s=_agServers.find(x=>Number(x.id)===id);
+    if(!s){ await reloadAdguards(); s=_agServers.find(x=>Number(x.id)===id); }
+    if(!s) return;
+    document.getElementById('ag-id').value=s.id;
+    document.getElementById('ag-name').value=s.name; document.getElementById('ag-url').value=s.url; document.getElementById('ag-username').value=s.username||'';
+    document.getElementById('ag-password').value=''; document.getElementById('ag-password').placeholder=s.has_pw?'•••••••• (unchanged)':'AdGuard admin password';
+    document.getElementById('ag-pw-hint').textContent=s.has_pw?'(leave blank to keep)':'(required)';
+    document.getElementById('ag-enabled').checked=s.enabled; document.getElementById('ag-verify').checked=s.verify;
+    document.getElementById('ag-form-title').textContent='Edit "'+s.name+'"';
+    document.getElementById('ag-save-lbl').textContent='Save changes';
+    document.getElementById('ag-cancel').style.display='';
+    document.getElementById('ag-form').scrollIntoView({behavior:'smooth',block:'nearest'});
+}
+async function saveAdguard(){
+    const url=document.getElementById('ag-url').value.trim();
+    if(!url){ agStatus('conn-bad','<i class="fas fa-times-circle"></i> Address is required'); return; }
+    const fd=new FormData();
+    fd.append('id', document.getElementById('ag-id').value);
+    fd.append('name', document.getElementById('ag-name').value.trim());
+    fd.append('url', url);
+    fd.append('username', document.getElementById('ag-username').value.trim());
+    fd.append('password', document.getElementById('ag-password').value);   // blank = keep on edit
+    fd.append('verify_tls', document.getElementById('ag-verify').checked?'1':'0');
+    fd.append('enabled', document.getElementById('ag-enabled').checked?'1':'0');
+    const r=await fetch('net_mon_config.php?api=adguard_server_save',{method:'POST',body:fd}).then(r=>r.json()).catch(()=>({ok:false}));
+    if(r.ok){ agStatus('conn-ok','<i class="fas fa-check-circle"></i> Saved. Click the test icon to verify.'); resetAdguardForm(); reloadAdguards(); }
+    else agStatus('conn-bad','<i class="fas fa-times-circle"></i> '+(r.err||'Save failed'));
+}
+async function testAdguard(id,btn){
+    if(btn){ btn.innerHTML='<i class="fas fa-circle-notch fa-spin"></i>'; }
+    agStatus('conn-unk','<i class="fas fa-circle-notch fa-spin"></i> Authenticating…');
+    const r=await fetch('net_mon_config.php?api=adguard_test&id='+id).then(r=>r.json()).catch(()=>({ok:false}));
+    if(btn){ btn.innerHTML='<i class="fas fa-satellite-dish"></i>'; }
+    agStatus(r.ok?'conn-ok':'conn-bad', r.ok?('<i class="fas fa-check-circle"></i> Connected'+(r.version?(' — AdGuard '+r.version):'')):('<i class="fas fa-times-circle"></i> '+(r.err||'Failed')));
+}
+async function deleteAdguard(id,name){
+    if(!confirm('Delete AdGuard "'+name+'"?')) return;
+    const fd=new FormData(); fd.append('id',id);
+    await fetch('net_mon_config.php?api=adguard_server_delete',{method:'POST',body:fd});
+    reloadAdguards(); resetAdguardForm();
 }
 async function saveNetflow(){
     const fd=new FormData(document.getElementById('nf-form'));

@@ -93,6 +93,7 @@ if (!function_exists('nm_perm_catalog')) {
             ['watchdog',        'Service Watchdog',   'Infrastructure', 'fa-solid fa-shield-heart',           'watchdog.php'],
             ['routers',         'Router Monitor',     'Infrastructure', 'fa-solid fa-route',                  'routers.php'],
             ['pihole',          'Pi-hole',            'Infrastructure', 'fa-solid fa-shield-halved',          'pihole.php'],
+            ['adguard',         'AdGuard Home',       'Infrastructure', 'fa-solid fa-shield-cat',             'adguard.php'],
             ['weather',         'Weather Routing',    'Infrastructure', 'fa-solid fa-hurricane',             'weather.php'],
             ['immunity',        'Collective Immunity','Healing',        'fa-solid fa-shield-virus',           'immunity.php'],
             ['deception',       'Deception Grid',     'Healing',        'fa-solid fa-mask',                   'deception.php'],

@@ -932,6 +932,16 @@ function nm_bio_flag_resolve($conn, int $id): array {
     try { $conn->query("UPDATE nm_bio_flags SET status='resolved' WHERE id=" . (int)$id); } catch (\Throwable $e) { return ['ok' => false, 'error' => $e->getMessage()]; }
     return ['ok' => true];
 }
+// Bulk dismiss: resolve every OPEN antibody at once (optionally only one kind, e.g. 'ux_break').
+// Lets the operator clear a backlog of many findings without clicking each one.
+function nm_bio_flags_resolve_all($conn, string $kind = ''): array {
+    nm_bio_ensure($conn);
+    $w = "status='open'";
+    if ($kind !== '') $w .= " AND kind='" . $conn->real_escape_string($kind) . "'";
+    try { $conn->query("UPDATE nm_bio_flags SET status='resolved' WHERE $w"); $n = $conn->affected_rows; }
+    catch (\Throwable $e) { return ['ok' => false, 'error' => $e->getMessage()]; }
+    return ['ok' => true, 'resolved' => (int)$n];
+}
 
 // ── Auto-Tune: APPLY directly + ANNOUNCE to channels ─────────────────────────
 // The operator is IN the portal clicking the button → clicking IS the approval. Apply the
@@ -1097,11 +1107,15 @@ function nm_bio_ingest_synthetic($conn, int $service_id, array $r): array {
         $st->bind_param('iiddiisiss', $service_id, $ok, $vct, $tot, $stotal, $sok, $bk, $cerr, $shot, $detail);
         $st->execute(); $st->close();
     } catch (\Throwable $e) { return ['ok' => false, 'error' => $e->getMessage()]; }
-    // raise a UX-break flag (deduped 1/hour) when the journey broke
-    if (!$ok || $broken !== '') {
+    // Raise a UX-break flag (deduped 1/hour) ONLY on real evidence of a broken journey:
+    // a concrete step that failed, or an explicit broken_step name from the flow. When the
+    // journey never actually ran (n8n bio-http-synthetic flow not built / returned no steps
+    // and no broken_step) `$broken` is empty — that's a configuration gap, NOT a UX break,
+    // so we must NOT spam useless "broke at: unknown step" antibodies every cron tick.
+    if ($broken !== '') {
         $sid = (int)$service_id;
         $ex = $conn->query("SELECT id FROM nm_bio_flags WHERE service_id=$sid AND kind='ux_break' AND status='open' AND created_at > (NOW()-INTERVAL 1 HOUR) LIMIT 1");
-        if (!($ex && $ex->num_rows)) nm_bio_flag_add($conn, $sid, 'ux_break', $broken, 'medium', "Synthetic journey broke at: " . ($broken ?: 'unknown step') . ". The rendered UX diverged from the healthy structure.");
+        if (!($ex && $ex->num_rows)) nm_bio_flag_add($conn, $sid, 'ux_break', $broken, 'medium', "Synthetic journey broke at step: " . $broken . ". The rendered UX diverged from the healthy structure.");
     }
     // prune synthetic history to the sample window
     try { $days = nm_bio_settings($conn)['sample_days']; $conn->query("DELETE FROM nm_bio_synthetic WHERE ts < (NOW()-INTERVAL " . (int)$days . " DAY)"); } catch (\Throwable $e) {}

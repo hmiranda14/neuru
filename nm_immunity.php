@@ -15,6 +15,7 @@
 // [[netmon-config-manager]] Python SSH for the firewall push.
 // ─────────────────────────────────────────────────────────────────────────────
 require_once __DIR__ . '/nm_pihole.php';
+require_once __DIR__ . '/nm_adguard.php';   // AdGuard Home fan-out (mirrors Pi-hole)
 require_once __DIR__ . '/nm_confmgr.php';   // nm_cm_resolve_ssh + nm_cm_ssh_fetch + vendors
 require_once __DIR__ . '/nm_audit.php';
 
@@ -44,7 +45,7 @@ if (!function_exists('nm_imm_vaccinate')) {
         $conn->query("CREATE TABLE IF NOT EXISTS nm_threat_actions (
             id BIGINT AUTO_INCREMENT PRIMARY KEY,
             threat_id INT NOT NULL,
-            target_type VARCHAR(10) NOT NULL,   -- pihole | firewall
+            target_type VARCHAR(10) NOT NULL,   -- pihole | adguard | firewall
             target_id INT DEFAULT NULL,
             target_name VARCHAR(120) DEFAULT NULL,
             status VARCHAR(10) NOT NULL,         -- ok | existed | failed
@@ -72,6 +73,11 @@ if (!function_exists('nm_imm_vaccinate')) {
         $indicator = trim($indicator);
         $type = in_array($type,['domain','regex','ip'],true)?$type:'domain';
         if ($indicator==='') return ['ok'=>false,'error'=>'empty indicator'];
+        // False-positive guard: never AUTO-flag a known-good domain (CDN / cloud / OS-app
+        // vendor / streaming / game). Manual adds are exempt — the operator chose deliberately.
+        if ($type==='domain' && $source!=='manual' && nm_imm_is_safe_domain($conn,$indicator)) {
+            return ['ok'=>true,'new'=>false,'skipped'=>'allowlisted'];
+        }
         $reportedBy = substr(trim($reportedBy),0,200);
         $ex = $conn->prepare("SELECT id FROM nm_threats WHERE indicator=? AND ind_type=? LIMIT 1");
         $ex->bind_param('ss',$indicator,$type); $ex->execute();
@@ -131,7 +137,7 @@ if (!function_exists('nm_imm_vaccinate')) {
     }
 
     // ── The vaccine: distribute the block to every Pi-hole / firewall ────────
-    function nm_imm_vaccinate($conn, int $threatId): array {
+    function nm_imm_vaccinate($conn, int $threatId, bool $notify = true): array {
         nm_imm_ensure($conn);
         $t = nm_imm_get($conn,$threatId); if(!$t) return ['ok'=>false,'error'=>'Threat not found'];
         $conn->query("DELETE FROM nm_threat_actions WHERE threat_id={$threatId}");
@@ -144,6 +150,12 @@ if (!function_exists('nm_imm_vaccinate')) {
                 nm_imm_log_action($conn,$threatId,'pihole',(int)$S['id'],$S['name'],$stt, $r['ok']?'deny added':($r['error']??''));
                 if($r['ok'])$okc++; else $failc++;
             }
+            foreach (nm_ag_servers($conn,true) as $S) {   // AdGuard Home — same domain block, as a user-rule
+                $r = nm_ag_add_deny($conn,(int)$S['id'],$ind,$kind,'NEURU immunity ['.$t['source'].']');
+                $stt = $r['ok'] ? (($r['existed']??false)?'existed':'ok') : 'failed';
+                nm_imm_log_action($conn,$threatId,'adguard',(int)$S['id'],$S['name'],$stt, $r['ok']?'rule added':($r['error']??''));
+                if($r['ok'])$okc++; else $failc++;
+            }
         } else { // ip → firewalls
             foreach (nm_imm_firewall_targets($conn) as $dev) {
                 $r = nm_imm_push_firewall($conn,$dev,$ind,false);
@@ -153,9 +165,11 @@ if (!function_exists('nm_imm_vaccinate')) {
         }
         try { $conn->query("UPDATE nm_threats SET status='active', distributed_ok={$okc}, distributed_fail={$failc}, vaccinated_at=NOW() WHERE id={$threatId}"); } catch (\Throwable $e) {}
         try { nm_audit($conn,'immunity.vaccinate',['target_type'=>'threat','target_id'=>$threatId,'details'=>['indicator'=>$ind,'type'=>$type,'ok'=>$okc,'fail'=>$failc]]); } catch (\Throwable $e) {}
-        // Notification Center: a fleet-wide block is a security event.
-        if (!function_exists('nm_notify_event')) { @include_once __DIR__.'/nm_notify.php'; }
-        if (function_exists('nm_notify_event')) {
+        // Notification Center: an AUTOMATIC fleet-wide block is a security event worth paging.
+        // Manual vaccinations from the console pass $notify=false — the operator just did it,
+        // so there's no need to alert them (and a bulk manual run would spam one msg per threat).
+        if ($notify && !function_exists('nm_notify_event')) { @include_once __DIR__.'/nm_notify.php'; }
+        if ($notify && function_exists('nm_notify_event')) {
             $sev = (($t['severity']??'')==='high') ? 'critical' : 'warning';
             @nm_notify_event($conn,'security',$sev,"Threat blocked fleet-wide: {$ind}",
                 "Type {$type} · distributed to {$okc} node(s)".($failc?" · {$failc} failed":"")." · source ".($t['source']??'manual'),
@@ -171,6 +185,7 @@ if (!function_exists('nm_imm_vaccinate')) {
         if ($type==='domain' || $type==='regex') {
             $kind = $type==='regex'?'regex':'exact';
             foreach (nm_ph_servers($conn,true) as $S) { try { nm_ph_remove_deny($conn,(int)$S['id'],$ind,$kind); } catch (\Throwable $e) {} }
+            foreach (nm_ag_servers($conn,true) as $S) { try { nm_ag_remove_deny($conn,(int)$S['id'],$ind,$kind); } catch (\Throwable $e) {} }
         } else {
             foreach (nm_imm_firewall_targets($conn) as $dev) { try { nm_imm_push_firewall($conn,$dev,$ind,true); } catch (\Throwable $e) {} }
         }
@@ -238,8 +253,45 @@ if (!function_exists('nm_imm_vaccinate')) {
         return $found;
     }
 
+    // ── Safe-domain allowlist (false-positive guard) ─────────────────────────
+    // Curated "never a threat" domains — major CDNs, cloud, OS/app vendors, streaming
+    // and game platforms. AUTOMATIC DNS-threat detection skips these, so a legit domain
+    // (Amazon Prime Video, Apple, Microsoft, a game CDN…) can never be auto-blocked.
+    // Users extend the list via the imm_dns_allowlist setting. MANUAL blocks bypass this
+    // (a deliberate operator choice — you can still block a specific subdomain by hand).
+    function nm_imm_safe_domains_default(): array {
+        return [
+            'amazonaws.com','amazon.com','media-amazon.com','ssl-images-amazon.com','pv-cdn.net','aiv-cdn.net','aiv-delivery.net','primevideo.com','cloudfront.net',
+            'apple.com','icloud.com','apple-dns.net','mzstatic.com','cdn-apple.com','push.apple.com',
+            'microsoft.com','windows.com','windowsupdate.com','office.com','office365.com','live.com','azure.com','azureedge.net','azurefd.net','msftncsi.com','msftconnecttest.com','msedge.net','microsoftonline.com','xboxlive.com','xbox.com','skype.com',
+            'google.com','googleapis.com','gstatic.com','googleusercontent.com','ggpht.com','gvt1.com','gvt2.com','gvt3.com','googlevideo.com','youtube.com','ytimg.com','android.com',
+            'cloudflare.com','cloudflare.net','cloudflare-dns.com','cloudflareinsights.com',
+            'akamai.net','akamaized.net','akamaiedge.net','akamaihd.net','edgesuite.net','edgekey.net',
+            'fastly.net','fastlylb.net','fbcdn.net','facebook.com','instagram.com','whatsapp.net','whatsapp.com',
+            'netflix.com','nflxvideo.net','nflximg.net','nflxext.com','nflxso.net',
+            'spotify.com','scdn.co','spotifycdn.com','twitch.tv','ttvnw.net','jtvnw.net',
+            'github.com','githubusercontent.com','githubassets.com',
+            'steampowered.com','steamcontent.com','steamstatic.com','steamserver.net','epicgames.com','unrealengine.com','ea.com','riotgames.com','riotcdn.net','battle.net','blizzard.com','playstation.net','playstation.com','nvidia.com','geforce.com','nvidiagrid.net','ubisoft.com','ubi.com','discord.com','discordapp.com','discord.gg',
+        ];
+    }
+    // True if $domain equals, or is a subdomain of, an allowlisted safe domain
+    // (built-in defaults + the user's imm_dns_allowlist, one entry per line/comma).
+    function nm_imm_is_safe_domain($conn, string $domain): bool {
+        $domain = strtolower(trim($domain));
+        if ($domain === '') return false;
+        $safe = nm_imm_safe_domains_default();
+        $user = trim((string)nm_imm_setting($conn,'imm_dns_allowlist',''));
+        if ($user !== '') foreach (preg_split('/[\r\n,]+/',$user) as $u) { $u=strtolower(trim($u)); if($u!=='' && $u[0]!=='#') $safe[]=ltrim($u,'.'); }
+        foreach ($safe as $s) { $s=ltrim(strtolower(trim($s)),'.'); if($s==='') continue;
+            if ($domain === $s || substr($domain, -(strlen($s)+1)) === '.'.$s) return true;
+        }
+        return false;
+    }
+
     // ── Detection: malicious DNS from a Pi-hole's recent queries ──────────────
     // Matches queried domains against the admin's threat regex list (one per line).
+    // Known-good domains (nm_imm_is_safe_domain) are skipped so a broad pattern can't
+    // pull in a legit CDN/vendor. Returns [domain => the pattern that matched].
     function nm_imm_detect_dns($conn): array {
         $raw = trim((string)nm_imm_setting($conn,'imm_dns_patterns',''));
         if ($raw==='') return [];
@@ -252,11 +304,12 @@ if (!function_exists('nm_imm_vaccinate')) {
         $hit=[];
         foreach($rows as $qr){
             $dom = strtolower((string)($qr['domain'] ?? '')); if($dom==='') continue;
+            if (nm_imm_is_safe_domain($conn,$dom)) continue;   // never flag a known-good domain
             foreach($pats as $p){
                 $rx = '~'.str_replace('~','\~',$p).'~i';
-                if (@preg_match($rx,$dom)) { $hit[$dom]=true; break; }
+                if (@preg_match($rx,$dom)) { $hit[$dom]=$p; break; }   // remember WHICH pattern matched
             }
         }
-        return array_keys($hit);
+        return $hit;   // [domain => matched pattern]
     }
 }

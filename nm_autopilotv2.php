@@ -1213,8 +1213,28 @@ function nm_ap2_resolve_node($conn, $ref): int {
             if ($n === $q) { return (int)$x['id']; }                                        // normalized exact → done
             elseif (strlen($q) >= 3 && strpos($n, $q) !== false) $sc = 0.80 + 0.15 * (strlen($q) / max(1, strlen($n)));
             elseif (strlen($n) >= 3 && strpos($q, $n) !== false) $sc = 0.75 + 0.15 * (strlen($n) / max(1, strlen($q)));
-            elseif ($qt) { $hit = 0; foreach ($qt as $t) { if ($t !== '' && (strlen($t) >= 2 || ctype_digit($t)) && strpos($n, $t) !== false) $hit++; }   // single-char DIGIT tokens count ("web","1")
-                if ($hit) $sc = 0.60 * ($hit / count($qt)); }                                // all/most tokens present
+            elseif ($qt) {
+                // Token match with a FUZZY fallback so VOICE mistranscriptions still resolve
+                // ("corp" heard for "core", "mikrotic" for "mikrotik"…). Each query token scores
+                // its best match against the node's tokens: substring = 1.0, else a close
+                // Levenshtein match (≤2 edits AND ≥70% similar, len ≥4) counts at 0.9. This is
+                // what lets the AI Commander understand a slightly-misheard node name again.
+                $ntoks = array_filter(array_map('strtolower', preg_split('/[^a-z0-9]+/i', (string)$x['display_name'])));
+                $acc = 0.0;
+                foreach ($qt as $t) {
+                    if ($t === '' || (strlen($t) < 2 && !ctype_digit($t))) continue;
+                    $bt = 0.0;
+                    if (strpos($n, $t) !== false) $bt = 1.0;                                   // token is a substring of the whole name
+                    else foreach ($ntoks as $nk) {
+                        if ($nk === '') continue;
+                        if (strpos($nk,$t)!==false || strpos($t,$nk)!==false) { $bt = 1.0; break; }
+                        $L = max(strlen($t), strlen($nk));
+                        if ($L >= 4) { $lev = levenshtein($t,$nk); $sim = 1 - $lev/$L; if ($lev <= 2 && $sim >= 0.70 && $sim*0.9 > $bt) $bt = $sim*0.9; }
+                    }
+                    $acc += $bt;
+                }
+                if ($acc > 0) $sc = 0.64 * ($acc / count($qt));                                // all/most tokens present (fuzzy-aware)
+            }
             if ($sc > $bestScore) { $bestScore = $sc; $best = (int)$x['id']; }
         } } catch (\Throwable $e) {}
     return $bestScore >= 0.5 ? $best : 0;                             // below 0.5 → not confident → 0 (never a wrong router)

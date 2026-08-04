@@ -151,6 +151,7 @@ window.NMLoader=(function(){var L=document.getElementById('nm-loader'),V=documen
                 ['containers',  'containers.php', 'fa-brands fa-docker',       'Containers'],
                 ['dbmon',       'dbmon.php',      'fa-solid fa-database',      'Data Core (DBs)'],
                 ['pihole',      'pihole.php',     'fa-solid fa-shield-halved', 'Pi-hole'],
+                ['adguard',     'adguard.php',    'fa-solid fa-shield-cat',    'AdGuard Home'],
                 ['__smokeping', 'smokeping.php',  'fa-solid fa-wave-square',   'Smokeping'],
                 ['weather',     'weather.php',   'fa-solid fa-hurricane',  'Weather Routing'],
             ]],

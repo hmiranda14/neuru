@@ -423,10 +423,15 @@ $ports_map  = [];
 $alerts     = [];
 $health_map = [];
 
-if ($librenms_enabled) {
+// LibreNMS is an OPTIONAL enrichment helper (mainly node import) — NEURU's native poller
+// already has the live data. Probe LibreNMS ONCE; if that first call doesn't answer
+// (LibreNMS down, or the network path to it is down — e.g. a core router rebooting), skip
+// EVERYTHING below. Without this circuit-breaker, N devices × ~4 curl calls each, all
+// waiting out the connect/read timeout, would hang the whole dashboard for minutes.
+$all_devices_raw = $librenms_enabled ? lnms_call('/api/v0/devices') : null;
+if ($librenms_enabled && $all_devices_raw !== null) {
 
-$all_devices_raw = lnms_call('/api/v0/devices');
-if ($all_devices_raw && isset($all_devices_raw['devices'])) {
+if (isset($all_devices_raw['devices'])) {
     foreach ($all_devices_raw['devices'] as $d) {
         $device_map[(int)$d['device_id']] = $d;
     }

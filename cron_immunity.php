@@ -31,8 +31,8 @@ if (nm_imm_setting($conn,'imm_detect_portscan','1') !== '0') {
     }
 }
 if (nm_imm_setting($conn,'imm_detect_dns','0') === '1') {
-    foreach (nm_imm_detect_dns($conn) as $d) {
-        $r = nm_imm_add_threat($conn, $d, 'domain', 'dns', 'high', 'Matched DNS threat pattern');
+    foreach (nm_imm_detect_dns($conn) as $d => $pat) {
+        $r = nm_imm_add_threat($conn, $d, 'domain', 'dns', 'high', 'Matched DNS pattern: '.$pat);
         if (!empty($r['new'])) $newIds[] = (int)$r['id'];
     }
 }

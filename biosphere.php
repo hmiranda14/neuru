@@ -55,6 +55,7 @@ if ($api) {
             case 'promote':   echo json_encode(nm_bio_flag_promote($conn, (int)($_POST['flag'] ?? 0), $uid)); break;
             case 'flags':     echo json_encode(['ok'=>true, 'flags'=>nm_bio_flags_all($conn, (string)($_GET['status'] ?? 'open'))]); break;
             case 'flag_resolve': echo json_encode(nm_bio_flag_resolve($conn, (int)($_POST['flag'] ?? 0))); break;
+            case 'flag_resolve_all': echo json_encode(nm_bio_flags_resolve_all($conn, (string)($_POST['kind'] ?? ''))); break;
             case 'dns_audit': echo json_encode(nm_bio_dns_audit($conn)); break;
             case 'advise':    echo json_encode(nm_bio_sql_advise($conn, (int)($_POST['id'] ?? 0))); break;
             case 'autotune':  echo json_encode(nm_bio_tg_send_autotune($conn, (int)($_POST['advice'] ?? 0), $uid)); break;
@@ -681,10 +682,18 @@ function mtab(t){ ['svc','add','flags','set'].forEach(x=>{ document.getElementBy
   if(t==='svc') loadSvcList(); if(t==='add') loadRefs(); if(t==='flags') loadFlags(); }
 async function loadFlags(){ const el=document.getElementById('flags-list'); const d=await fetch('biosphere.php?api=flags&status=open').then(r=>r.json());
   if(!d||!d.ok||!d.flags.length){ el.innerHTML='<div class="dmuted">No open antibodies. 🟢 The biosphere is clean.</div>'; return; }
-  el.innerHTML=d.flags.map(f=>{ const crit=f.severity==='high'; return `<div class="ditem ${crit?'crit':'warn'}"><div class="t"><span>${esc(f.kind)}${f.indicator?(' — '+esc(f.indicator)):''}</span><span class="dbadge ${crit?'crit':'warn'}">${esc(f.severity)}</span></div>
+  const kc={}; d.flags.forEach(f=>{ kc[f.kind]=(kc[f.kind]||0)+1; }); const n=d.flags.length;
+  let bar='<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:10px;flex-wrap:wrap"><span class="dmuted">'+n+(n>=60?'+':'')+' open antibod'+(n===1?'y':'ies')+'</span><span style="display:flex;gap:6px;flex-wrap:wrap">';
+  Object.keys(kc).filter(k=>kc[k]>1).forEach(k=>{ bar+='<button class="act" style="padding:4px 8px;font-size:11px" onclick="resolveAllFlags(\''+k+'\')">✓ Resolve all '+esc(k)+' ('+kc[k]+')</button>'; });
+  bar+='<button class="act" style="padding:4px 8px;font-size:11px" onclick="resolveAllFlags(\'\')">✓ Resolve all</button></span></div>';
+  el.innerHTML=bar+d.flags.map(f=>{ const crit=f.severity==='high'; return `<div class="ditem ${crit?'crit':'warn'}"><div class="t"><span>${esc(f.kind)}${f.indicator?(' — '+esc(f.indicator)):''}</span><span class="dbadge ${crit?'crit':'warn'}">${esc(f.severity)}</span></div>
     <div class="d">${esc(f.svc_name||'')}${f.detail?(' · '+esc(f.detail)):''}</div>
     <div class="d" style="display:flex;gap:6px;margin-top:6px">${f.indicator?`<button class="act" style="padding:4px 8px;font-size:11px" onclick="promoteFlag(${f.id},1)">🛡 Block fleet-wide</button>`:''}<button class="act" style="padding:4px 8px;font-size:11px" onclick="resolveFlag(${f.id})">✓ Resolve</button></div></div>`; }).join(''); }
 async function resolveFlag(id){ await fetch('biosphere.php?api=flag_resolve',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'flag='+id}); loadFlags(); }
+async function resolveAllFlags(kind){ const label=kind?('all "'+kind+'" antibodies'):'ALL open antibodies';
+  if(!confirm('Resolve '+label+'? This dismisses them (marks them resolved).')) return;
+  const r=await fetch('biosphere.php?api=flag_resolve_all',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'kind='+encodeURIComponent(kind||'')}).then(r=>r.json()).catch(()=>({ok:false}));
+  loadFlags(); }
 async function runDnsAudit(btn){ const o=btn.innerHTML; btn.disabled=true; btn.innerHTML='<i class="fa-solid fa-spinner fa-spin"></i> Auditing…';
   const r=await fetch('biosphere.php?api=dns_audit').then(r=>r.json()).catch(()=>({ok:false,error:'request failed'})); btn.disabled=false; btn.innerHTML=o;
   alert(r.ok?`Audited ${r.candidates||0} domains · flagged ${r.flagged||0} · auto-blocked ${r.promoted||0}.\n${r.note||''}`:('Failed: '+(r.error||r.note||'?'))); loadFlags(); }

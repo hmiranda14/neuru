@@ -475,10 +475,14 @@ def discover_interfaces(cur, node_id, ip, community, snmp_ver):
             cur.execute("UPDATE nm_interfaces SET if_index=%s WHERE id=%s", (int(idx_str), iface_id))
             updated += 1
         else:
-            # New interface — insert. Real NICs are auto-monitored (show_graph=1);
-            # known virtual/pseudo adapters are discovered but OFF by default so they
-            # don't flood the alert engine when up/down.
-            show = 0 if is_virtual_iface(name_trunc) else 1
+            # New interface — insert DISABLED (show_graph=0). NEURU monitors ONLY the
+            # interfaces the operator selects in Config; the poller no longer auto-enables
+            # every "real-looking" NIC. A Windows box exposes many identically named /
+            # virtual adapters (multiple "Realtek PCIe GbE", Hyper-V/WSL host-only NICs on
+            # 192.168.64.x, etc.), some permanently down — auto-monitoring them produced
+            # false "interface down" alarms. reconcile_primary_iface() auto-selects just
+            # the single interface carrying the management IP as a sensible default.
+            show = 0
             cur.execute("""
                 INSERT INTO nm_interfaces
                     (node_id, lnms_port_id, if_name, display_name, if_index, show_graph, sort_order)
@@ -521,6 +525,19 @@ def reconcile_primary_iface(cur, node_id, mgmt_ip, ipmap):
     cur_idx = ipmap.get(mgmt_ip)
     if not cur_idx:
         return
+    # Sensible one-time default: if the operator hasn't selected ANY interface to monitor
+    # yet, auto-select the single interface that carries the management IP — but ONLY if it
+    # isn't a virtual/pseudo adapter. This keeps a fresh node's real NIC monitored out of
+    # the box without re-enabling the phantom NICs discovery now leaves OFF. Never overrides
+    # an operator who already picked interfaces (only fires when zero are monitored).
+    cur.execute("SELECT COUNT(*) FROM nm_interfaces WHERE node_id=%s AND show_graph=1", (node_id,))
+    if (cur.fetchone() or [0])[0] == 0:
+        cur.execute("""SELECT id, if_name FROM nm_interfaces
+                       WHERE node_id=%s AND if_index=%s ORDER BY id LIMIT 1""", (node_id, int(cur_idx)))
+        mrow = cur.fetchone()
+        if mrow and not is_virtual_iface(mrow[1] or ''):
+            cur.execute("UPDATE nm_interfaces SET show_graph=1 WHERE id=%s", (mrow[0],))
+            log(f"    Auto-selected mgmt-IP interface '{mrow[1]}' (ifIndex {cur_idx}) as default monitor")
     # the operator's monitored interface for the mgmt IP (keeps its friendly name/alias)
     cur.execute("""SELECT id, if_index FROM nm_interfaces
                    WHERE node_id=%s AND show_graph=1 AND if_ip_address=%s

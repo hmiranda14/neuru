@@ -74,8 +74,9 @@ if ($api !== '') {
                 'ok'=>(int)$t['distributed_ok'],'fail'=>(int)$t['distributed_fail'],'last_seen'=>$t['last_seen'],'vaccinated_at'=>$t['vaccinated_at']];
         }
         $ph = count(nm_ph_servers($conn,true));
+        $ag = count(nm_ag_servers($conn,true));
         echo json_encode(['ok'=>true,'threats'=>$threats,'counts'=>nm_imm_counts($conn),
-            'piholes'=>$ph,'firewalls'=>count($fwt),
+            'piholes'=>$ph,'adguards'=>$ag,'firewalls'=>count($fwt),
             'fw_points'=>array_map(fn($d)=>['name'=>$d['name'],'ip'=>$d['host_ip']], $fwt)]); exit;
     }
     if ($api === 'actions') {
@@ -89,10 +90,10 @@ if ($api !== '') {
         $a=nm_imm_add_threat($conn,$ind,$type,'manual','high','Manually added',$uid);
         if(empty($a['ok'])){ echo json_encode($a); exit; }
         $res=['ok'=>true,'id'=>$a['id'],'new'=>$a['new']];
-        if(!empty($body['vaccinate'])) $res['vaccine']=nm_imm_vaccinate($conn,(int)$a['id']);
+        if(!empty($body['vaccinate'])) $res['vaccine']=nm_imm_vaccinate($conn,(int)$a['id'],false);   // manual → no Telegram
         echo json_encode($res); exit;
     }
-    if ($api === 'vaccinate') { echo json_encode(nm_imm_vaccinate($conn,(int)($body['id']??0))); exit; }
+    if ($api === 'vaccinate') { echo json_encode(nm_imm_vaccinate($conn,(int)($body['id']??0),false)); exit; }   // manual → no Telegram
     if ($api === 'vaccinate_bulk') {   // vaccinate many threats at once → STREAM per-threat progress (NDJSON)
         $ids = array_values(array_filter(array_map('intval', (array)($body['ids'] ?? []))));
         header('Content-Type: application/x-ndjson; charset=utf-8');
@@ -106,7 +107,7 @@ if ($api !== '') {
         foreach ($ids as $k => $tid) {
             $th = nm_imm_get($conn, $tid); $label = $th ? (string)($th['indicator'] ?? ('#'.$tid)) : ('#'.$tid);
             $emit(['t'=>'progress','i'=>$k+1,'n'=>$n,'id'=>$tid,'indicator'=>$label]);   // "applying #k of n"
-            try { $r = nm_imm_vaccinate($conn, $tid); } catch (\Throwable $e) { $r = ['ok'=>false,'error'=>$e->getMessage()]; }
+            try { $r = nm_imm_vaccinate($conn, $tid, false); } catch (\Throwable $e) { $r = ['ok'=>false,'error'=>$e->getMessage()]; }   // manual bulk → no Telegram spam
             $ok = !empty($r['ok']); if ($ok) { $done++; $dist += (int)($r['distributed'] ?? 0); $failed += (int)($r['failed'] ?? 0); }
             $emit(['t'=>'result','i'=>$k+1,'n'=>$n,'id'=>$tid,'indicator'=>$label,'ok'=>$ok,
                 'distributed'=>(int)($r['distributed'] ?? 0),'failed'=>(int)($r['failed'] ?? 0),'error'=>$ok?null:($r['error'] ?? 'failed')]);
@@ -128,7 +129,7 @@ if ($api !== '') {
     if ($api === 'detect_now') {
         $ps=nm_imm_detect_portscan($conn); $dn=nm_imm_detect_dns($conn); $added=0;
         foreach($ps as $p){ $det='Port scan — '.$p['ports'].' ports'.(!empty($p['target'])?(' → '.$p['target']):''); $r=nm_imm_add_threat($conn,$p['ip'],'ip','portscan','high',$det,null,$p['reported_by']??''); if(!empty($r['new']))$added++; }
-        foreach($dn as $d){ $r=nm_imm_add_threat($conn,$d,'domain','dns','high','Matched DNS threat pattern'); if(!empty($r['new']))$added++; }
+        foreach($dn as $d=>$pat){ $r=nm_imm_add_threat($conn,$d,'domain','dns','high','Matched DNS pattern: '.$pat); if(!empty($r['new']))$added++; }
         echo json_encode(['ok'=>true,'portscan'=>count($ps),'dns'=>count($dn),'new'=>$added]); exit;
     }
     if ($api === 'save_settings') {
@@ -138,6 +139,7 @@ if ($api !== '') {
         $set('imm_portscan_window', (string)max(1,(int)($body['imm_portscan_window']??10)));
         $set('imm_portscan_ports',  (string)max(2,(int)($body['imm_portscan_ports']??10)));
         $set('imm_dns_patterns',    substr((string)($body['imm_dns_patterns']??''),0,4000));
+        $set('imm_dns_allowlist',   substr((string)($body['imm_dns_allowlist']??''),0,8000));
         $fw = $body['imm_fw_device_ids'] ?? [];
         $set('imm_fw_device_ids', is_array($fw)?implode(',',array_map('intval',$fw)):'');
         nm_audit($conn,'immunity.settings');
@@ -152,7 +154,7 @@ $fwids = array_filter(array_map('intval', explode(',', (string)nm_imm_setting($c
 $S=[ 'enabled'=>nm_imm_setting($conn,'immunity_enabled','1'),'auto'=>nm_imm_setting($conn,'imm_auto_vaccinate','0'),
      'ps'=>nm_imm_setting($conn,'imm_detect_portscan','1'),'dns'=>nm_imm_setting($conn,'imm_detect_dns','0'),
      'win'=>nm_imm_setting($conn,'imm_portscan_window','10'),'ports'=>nm_imm_setting($conn,'imm_portscan_ports','10'),
-     'patterns'=>nm_imm_setting($conn,'imm_dns_patterns','') ];
+     'patterns'=>nm_imm_setting($conn,'imm_dns_patterns',''),'allowlist'=>nm_imm_setting($conn,'imm_dns_allowlist','') ];
 log_user_action($conn,'view_page','immunity.php');
 $videoFile = !empty($_SESSION['user_bgsite_video']) ? $_SESSION['user_bgsite_video'] : 'sg_homepage_notext8-1-2022.mp4';
 ?>
@@ -267,6 +269,9 @@ th{ color:#7c828c; font-size:11px; text-transform:uppercase; letter-spacing:.5px
     <div class="toggle" style="margin-top:10px;"><label class="sw" style="cursor:pointer"><input type="checkbox" id="s-dns" <?= $S['dns']==='1'?'checked':'' ?> <?= $dis ?>><i></i></label> Detect malicious DNS (Pi-hole logs)</div>
     <label>DNS threat patterns <span class="muted">(regex, one per line)</span></label>
     <textarea class="inp" id="s-patterns" placeholder="\.ru$&#10;(^|\.)malware&#10;dga-[a-z0-9]{12}" <?= $dis ?>><?= htmlspecialchars($S['patterns']) ?></textarea>
+    <label>Safe-domain allowlist <span class="muted">(never auto-blocked — one domain per line)</span></label>
+    <textarea class="inp" id="s-allowlist" placeholder="mycompany.com&#10;internal.example.net" <?= $dis ?>><?= htmlspecialchars($S['allowlist']) ?></textarea>
+    <div class="muted" style="font-size:11.5px;margin:-4px 0 10px;"><i class="fas fa-shield-check" style="color:#2ecc71;"></i> Major CDNs, cloud, OS/app vendors, streaming &amp; game platforms (Amazon, Apple, Microsoft, Google, Cloudflare, Akamai, Steam, PlayStation…) are <b>already</b> excluded from automatic detection. Add your own domains above. <b>Manual</b> blocks are never affected by the allowlist.</div>
     <label id="fw-config">Firewall enforcement points <span class="muted">(Config Manager devices — IP blocks are SSH'd here)</span></label>
     <div class="fwlist">
       <?php if(!$devices): ?><span class="muted">No Config Manager devices. Add routers/firewalls there first.</span>
@@ -285,7 +290,7 @@ th{ color:#7c828c; font-size:11px; text-transform:uppercase; letter-spacing:.5px
 </div>
 <script>
 const CAN=<?= $canConfig?'true':'false' ?>;
-let FW_POINTS=[], THREATS={}, PIHOLES=0;
+let FW_POINTS=[], THREATS={}, PIHOLES=0, ADGUARDS=0;
 let ALL_THREATS=[], SELECTED=new Set(), PAGE=1, FILTER='all'; const PAGE_SIZE=100;
 function esc(s){ return (s==null?'':String(s)).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }   // also escape quotes → safe in title="…" attributes (untrusted syslog/geo)
 
@@ -369,12 +374,12 @@ async function load(){
   document.getElementById('k-active').textContent=r.counts.active||0;
   document.getElementById('k-pending').textContent=r.counts.pending||0;
   document.getElementById('k-ph').textContent=r.piholes; document.getElementById('k-fw').textContent=r.firewalls;
-  FW_POINTS=r.fw_points||[]; PIHOLES=r.piholes||0; THREATS={}; (r.threats||[]).forEach(t=>THREATS[t.id]=t);
+  FW_POINTS=r.fw_points||[]; PIHOLES=r.piholes||0; ADGUARDS=r.adguards||0; THREATS={}; (r.threats||[]).forEach(t=>THREATS[t.id]=t);
   const fwNames=FW_POINTS.map(p=>p.name);
   document.getElementById('fw-banner').innerHTML =
     `<i class="fas fa-shield-halved"></i> On <b>Vaccinate</b>: <b>IP</b> threats are blocked on `+
     (fwNames.length?`<b style="color:#cfe4ff">${fwNames.map(esc).join(', ')}</b>`:`<b style="color:#f0a559">no firewalls configured yet</b>`)+
-    ` · <b>domain</b> threats on <b>${PIHOLES}</b> Pi-hole(s). `+
+    ` · <b>domain</b> threats on <b>${PIHOLES}</b> Pi-hole(s) and <b>${ADGUARDS}</b> AdGuard(s). `+
     `<a href="#fw-config" onclick="document.getElementById('fw-config').scrollIntoView({behavior:'smooth'});return false;">Change which routers ↓</a>`;
   ALL_THREATS = r.threats || [];
   // drop selections for threats that no longer exist
@@ -440,7 +445,7 @@ async function vacc(id,btn){
       warn='\n\n⚠ WARNING: this threat was SEEN BY “'+who+'”, which is NOT in the list above. The block applies on the router(s) listed — NOT on the one that sees this traffic. Add that device as an enforcement point to stop it at the source.';
     }
   } else {
-    targets='All enabled Pi-hole(s): '+PIHOLES;
+    targets='All enabled Pi-hole(s): '+PIHOLES+'  ·  AdGuard(s): '+ADGUARDS;
   }
   if(!await nmConfirm('Vaccinate '+(t.indicator||'')+' ?\n\nThis pushes a block to:\n'+targets+warn)) return;
   if(btn)btn.disabled=true; const r=await post('vaccinate',{id}); if(btn)btn.disabled=false;
@@ -466,7 +471,7 @@ async function saveSettings(btn){
   const r=await post('save_settings',{ immunity_enabled:document.getElementById('s-enabled').checked, imm_auto_vaccinate:document.getElementById('s-auto').checked,
     imm_detect_portscan:document.getElementById('s-ps').checked, imm_detect_dns:document.getElementById('s-dns').checked,
     imm_portscan_window:document.getElementById('s-win').value, imm_portscan_ports:document.getElementById('s-ports').value,
-    imm_dns_patterns:document.getElementById('s-patterns').value, imm_fw_device_ids:fw });
+    imm_dns_patterns:document.getElementById('s-patterns').value, imm_dns_allowlist:document.getElementById('s-allowlist').value, imm_fw_device_ids:fw });
   btn.disabled=false; document.getElementById('s-msg').textContent=r.ok?'Saved ✓':(r.error||'Failed'); load();
 }
 load(); setInterval(load, 30000);

@@ -96,6 +96,7 @@ $user = $_SESSION['username'] ?? '';
       $vis = [];
       foreach ($grp['items'] as $it) {
           $perm = $it[0];
+          if (($it[1] ?? '') === 'monitoring_center.php') continue; // don't list this hub inside itself (self-link → nowhere)
           if ($perm === '__smokeping') { if (!empty($_nm_sp_on)) $vis[] = $it; continue; }
           if ($perm === '__always')    { $vis[] = $it; continue; }
           if (function_exists('_nm_can') ? _nm_can($perm) : true) $vis[] = $it;

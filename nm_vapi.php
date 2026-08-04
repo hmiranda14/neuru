@@ -136,7 +136,11 @@ function nm_vapi_api($conn, string $method, string $path, ?array $body = null): 
 // VAPI's LLM speaks it in the operator's language (also fixes cross-language blending). 'slow' tools
 // (SSH/route sims) carry the localized "still working…" fillers; instant DB tools don't need them.
 function nm_vapi_tool_defs(): array {
-    $obj = function (array $props, array $req = []) { return ['type' => 'object', 'properties' => $props, 'required' => $req]; };
+    // NOTE: properties MUST be a JSON object. An empty PHP array json-encodes as `[]` (array),
+    // which VAPI rejects ("each value in …properties must be an object") — that 400 was silently
+    // breaking EVERY provision, so the assistant never got its tools. Cast to object so a
+    // no-arg tool (close_xray, scan_fleet) emits `properties:{}` not `properties:[]`.
+    $obj = function (array $props, array $req = []) { return ['type' => 'object', 'properties' => (object)$props, 'required' => $req]; };
     $str = function ($d) { return ['type' => 'string', 'description' => $d]; };
     $num = function ($d) { return ['type' => 'number', 'description' => $d]; };
     $enum = function (array $vals, $d) { return ['type' => 'string', 'enum' => $vals, 'description' => $d]; };

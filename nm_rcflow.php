@@ -325,28 +325,55 @@ if (!function_exists('nm_rc_send')) {
     function nm_rc_continue($conn,$id){
         $sess = nm_rc_session($conn,$id);
         if (!$sess) return ['ok'=>false,'error'=>'Session not found'];
-        $cnt = $conn->query("SELECT COUNT(*) c FROM nm_rc_logs WHERE session_id=".(int)$id." AND level='cmd'");
-        $n = $cnt ? (int)$cnt->fetch_assoc()['c'] : 0;
-        if ($n >= 40) {
-            nm_rc_log($conn,$id,'info','Auto-continue paused after 40 commands. Review and continue manually.');
-            return ['ok'=>true,'paused'=>true];
+        // Every command run this session (chronological) — for step budget + cycle detection.
+        $all=[]; $ar=$conn->query("SELECT line FROM nm_rc_logs WHERE session_id=".(int)$id." AND level='cmd' ORDER BY id ASC");
+        while($ar && $x=$ar->fetch_row()) { $c=trim((string)$x[0]); if($c!=='') $all[]=$c; }
+        $n = count($all);
+
+        // ── Loop / cycle detection ────────────────────────────────────────────
+        // The old guard only caught the SAME command 3× in a row. Real loops cycle
+        // through DIFFERENT commands (ping → curl → docker logs → ping → curl → …),
+        // which slipped through. Now: normalize each command, count occurrences, and
+        // treat it as looping if a multi-command cycle formed (≥2 commands repeated)
+        // OR any command ran ≥3×. Also a much tighter step budget (was 40).
+        $norm = function($c){ return preg_replace('/\s+/',' ', strtolower(trim((string)$c))); };
+        $seen = [];
+        foreach ($all as $c) { $k=$norm($c); $seen[$k]=($seen[$k]??0)+1; }
+        $repeaters = count(array_filter($seen, fn($v)=>$v>=2));   // distinct commands run 2+ times
+        $maxRepeat = $seen ? max($seen) : 0;
+        $looping = ($n >= 5) && ($repeaters >= 2 || $maxRepeat >= 3);
+        $hardCap = ($n >= 12);
+
+        if ($looping || $hardCap) {
+            $why = $hardCap ? "gathered {$n} commands of diagnostics" : "started re-running earlier commands (the read-only diagnosis is done)";
+            nm_rc_log($conn,$id,'info','◆ Enough diagnosis — converging on the FIX ('.$why.').');
+            $ranList = implode("\n", array_map(fn($c)=>'  • '.substr($c,0,120), array_slice(array_values(array_unique($all)),0,30)));
+            // The whole point of a Solution Commander is to SOLVE — not to re-run diagnostics
+            // forever, and NOT to surrender with a summary. When the read-only investigation has
+            // enough data (or is looping), pivot to the FIX: name the root cause and propose the
+            // concrete action(s) that resolve it, ready for the operator to approve.
+            $msg = "You have enough diagnostic data — running the same commands again adds nothing.\n\n"
+                 . "Diagnostics already gathered:\n{$ranList}\n\n"
+                 . "Now SOLVE the operator's problem (\"".substr((string)$sess['problem'],0,300)."\"). You are a Solution Commander — resolving it is the job, not describing it. Reply with:\n"
+                 . "1) ROOT CAUSE — one or two concrete sentences grounded in the outputs above.\n"
+                 . "2) THE FIX — propose the exact command(s) or config change that resolves it, as the next command to run (the operator will approve/apply it). If it is a config edit, give the precise change and the command to apply + restart.\n"
+                 . "Only if truly no fix exists (e.g. it is an external outage) say so plainly and give the workaround. Do NOT repeat any diagnostic command above.";
+            $r = nm_rc_send($conn,$sess,['mode'=>'suggest','message'=>$msg]);
+            return ['ok'=>($r['ok']??false),'paused'=>false,'concluded'=>true,'error'=>($r['err']??null)];
         }
-        // Anti-loop: if the same command just ran 3× in a row, stop instead of re-asking.
-        $rr=$conn->query("SELECT line FROM nm_rc_logs WHERE session_id=".(int)$id." AND level='cmd' ORDER BY id DESC LIMIT 3");
-        $lasts=[]; while($rr && $x=$rr->fetch_row()) $lasts[]=$x[0];
-        if (count($lasts)>=3 && $lasts[0]===$lasts[1] && $lasts[1]===$lasts[2]) {
-            nm_rc_log($conn,$id,'info','⚠ Auto-loop stopped — the same command ran 3 times in a row without progress. Type a message to guide the AI, or run a different command. (Likely the n8n AI Agent isn\'t reading the command output — see docs/N8N_ROUTER_COMMANDER.md.)');
-            return ['ok'=>true,'paused'=>true];
-        }
+
         nm_rc_log($conn,$id,'info','AI is reviewing the command output…');
         $ex = nm_rc_last_exchange($conn,$id);
+        $ranList = $all ? implode(' | ', array_slice(array_values(array_unique(array_map(fn($c)=>substr($c,0,70),$all))),-14)) : '';
         $msg = 'Review the command output above. If the issue is resolved, say so and stop. Otherwise propose the single next command.';
         if ($ex) {
             $out = substr((string)$ex['output'], 0, 4000);
             $msg = "The command you proposed just executed:\n\n{$ex['cmd']}\n\nIts actual output was:\n".($out!==''?$out:'(no output)')
                  . "\n\nAnalyze THIS output against the user's problem: \"".substr((string)$sess['problem'],0,300)."\".\n"
+                 . "Commands ALREADY run this session — NEVER propose any of these again: ".($ranList!==''?$ranList:'(none)')."\n"
+                 . "You are on step {$n} of ~10 — converge fast.\n"
                  . "• If the output already answers the problem, summarize the answer for the user and STOP — return NO command.\n"
-                 . "• Otherwise propose ONE different next command. Do NOT repeat the command above; it already ran.";
+                 . "• Otherwise propose ONE NEW command you have NOT run yet. Repeating a command above is forbidden.";
         }
         $r = nm_rc_send($conn,$sess,['mode'=>'auto','message'=>$msg]);
         return ['ok'=>$r['ok'],'paused'=>false,'error'=>$r['err'] ?: null];
