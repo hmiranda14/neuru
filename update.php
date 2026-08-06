@@ -40,6 +40,7 @@ if ($api !== '') {
                 'last'      => nm_update_last($conn),
                 'staged'    => $staged ? ['version'=>$staged['version'],'sha256'=>$staged['sha256'],'size'=>$staged['size'] ?? null,'at'=>$staged['at'] ?? null] : null,
                 'can_web_apply' => nm_update_can_apply_in_web(),
+                'reboot_pending'=> nm_update_reboot_pending($conn),
                 'history'   => nm_update_history($conn),
             ]); exit;
         }
@@ -95,6 +96,9 @@ table.hist td{padding:7px 8px;border-top:1px solid rgba(255,255,255,.06)}
 
   <!-- prominent live status banner -->
   <div class="glass" id="status" style="display:none;padding:14px 18px;margin-bottom:16px;font-size:14px"></div>
+
+  <!-- restart-required banner — shown after an update is applied, until the containers are restarted -->
+  <div class="glass card" id="reboot" style="display:none;border:1px solid rgba(255,180,60,.4);background:rgba(255,170,40,.06);margin-bottom:16px"></div>
 
   <div class="glass card">
     <div class="grid2">
@@ -153,6 +157,22 @@ function note(msg, kind){
   n.innerHTML='<i class="fa-solid '+map[3]+'" style="margin-right:9px"></i>'+esc(msg);
 }
 
+// Restart-required banner: an update's files are live but the containers haven't restarted, so the
+// entrypoint hasn't re-run its self-heal AND the WireGuard sidecar hasn't reconnected the tunnel the
+// Flows ride on. Order matters — neuru-wg shares neuru-web's netns → restart web first, then wg.
+function rebootBanner(ver){
+  const el=document.getElementById('reboot'); el.style.display='block';
+  el.innerHTML = `<div class="title" style="font-size:15px;color:#ffd98a"><i class="fa-solid fa-power-off"></i> Restart required to finish v${esc(ver)}</div>
+    <div class="muted" style="margin:8px 0 10px">The new files are live, but the <b>containers must be restarted</b> so the entrypoint re-runs its self-heal (cron permissions &amp; DB access) and the <b>WireGuard tunnel reconnects</b> — NEURU <b>Flows won't work until WG reconnects</b>.</div>
+    <div style="margin-bottom:6px"><b>Order matters</b> — <span class="mono">neuru-wg</span> shares <span class="mono">neuru-web</span>'s network namespace, so restart <b>web first, then wg</b>:</div>
+    <pre class="notes">1)  docker restart neuru-web     # app + entrypoint self-heal (crons / permissions)
+2)  docker restart neuru-wg      # reconnects the WireGuard tunnel → Flows work again
+
+# or, in one line (kept in order):
+docker restart neuru-web && docker restart neuru-wg</pre>
+    <div class="hint">Run on the host where NEURU's containers live. This notice clears itself once the containers have restarted.</div>`;
+}
+
 function render(s){
   document.getElementById('appv').textContent = 'v'+s.version;
   document.getElementById('kv-ver').textContent = s.version;
@@ -181,6 +201,9 @@ function render(s){
   }
   // show cached last result
   if(s.last) showAvail(s.last, s.version);
+  // restart-required banner (applied update awaiting a container restart)
+  if(s.reboot_pending) rebootBanner(s.reboot_pending);
+  else document.getElementById('reboot').style.display='none';
 }
 
 function showAvail(r, cur){

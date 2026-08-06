@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" width="48" height="48" role="img" aria-label="NEURU">
+  <defs>
+    <linearGradient id="nfg" x1="4" y1="4" x2="44" y2="44" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#38bdf8"/><stop offset=".55" stop-color="#4da3ff"/><stop offset="1" stop-color="#7c5cff"/>
+    </linearGradient>
+    <radialGradient id="nfglow" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(24 24) scale(11)">
+      <stop stop-color="#96d2ff" stop-opacity=".85"/><stop offset="1" stop-color="#96d2ff" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <circle cx="24" cy="24" r="22" fill="url(#nfg)"/>
+  <circle cx="24" cy="24" r="11" fill="url(#nfglow)"/>
+  <g stroke="#c8e6ff" stroke-width="1.1" opacity=".55">
+    <line x1="13" y1="17" x2="24" y2="14"/><line x1="13" y1="17" x2="24" y2="24"/>
+    <line x1="13" y1="24" x2="24" y2="14"/><line x1="13" y1="24" x2="24" y2="24"/><line x1="13" y1="24" x2="24" y2="34"/>
+    <line x1="13" y1="31" x2="24" y2="24"/><line x1="13" y1="31" x2="24" y2="34"/>
+    <line x1="24" y1="14" x2="35" y2="19"/><line x1="24" y1="24" x2="35" y2="19"/>
+    <line x1="24" y1="24" x2="35" y2="29"/><line x1="24" y1="34" x2="35" y2="29"/>
+  </g>
+  <g fill="#c8e6ff">
+    <circle cx="13" cy="17" r="2.1"/><circle cx="13" cy="24" r="2.1"/><circle cx="13" cy="31" r="2.1"/>
+    <circle cx="24" cy="14" r="2.1"/><circle cx="24" cy="34" r="2.1"/>
+    <circle cx="35" cy="19" r="2.1"/><circle cx="35" cy="29" r="2.1"/>
+  </g>
+  <circle cx="24" cy="24" r="3.4" fill="#ebf5ff"/>
+</svg>

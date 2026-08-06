@@ -35,6 +35,13 @@ function _nm_active($page) {
 <!DOCTYPE html>
 <!-- header fragment — pages should NOT repeat DOCTYPE; include this at the very top -->
 
+<!-- NEURU favicon (brand neural emblem). /favicon.ico at the web root is auto-fetched by every
+     page too; these tags add the crisp SVG + apple-touch for pages that include this header. -->
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png">
+<link rel="icon" href="/favicon.ico" sizes="any">
+<link rel="apple-touch-icon" href="/favicon-180.png">
+
 <!-- ── Global page loader (all pages) — a fixed overlay that fades OUT on load to reveal
      the page. NEVER touches body opacity (that would re-create a stacking context and hide
      the NMNetBG particle canvas). Self-contained styles so it works before page CSS loads. -->

@@ -1075,6 +1075,19 @@ if (isset($_GET['api'])) {
         // ── Get discovery candidates ──────────────────────────────────────────────
         case 'get_candidates':
             include_once('connection.php');
+            // Reconcile "imported" status against the LIVE nodes table so the badge is always
+            // truthful: a candidate whose node was since DELETED flips back to 'pending' (importable
+            // again — the bug this fixes), and a candidate whose IP now exists as a node shows as
+            // in-system. 'rejected' candidates are left untouched. Best-effort (mysqli is in
+            // exception mode) so a reconcile hiccup never takes down the discovery list.
+            try {
+                $conn->query("UPDATE nm_discovery_candidates c LEFT JOIN nm_nodes n ON n.ip_address=c.ip_address
+                              SET c.status='pending', c.node_id=NULL
+                              WHERE c.status='imported' AND n.id IS NULL");
+                $conn->query("UPDATE nm_discovery_candidates c JOIN nm_nodes n ON n.ip_address=c.ip_address
+                              SET c.status='imported', c.node_id=n.id
+                              WHERE c.status='pending'");
+            } catch (\Throwable $e) { /* non-critical — never break the candidate list */ }
             $res = $conn->query("SELECT * FROM nm_discovery_candidates
                 ORDER BY FIELD(status,'pending','imported','rejected'), discovered_at DESC");
             echo json_encode(['candidates'=> $res ? $res->fetch_all(MYSQLI_ASSOC) : []]);
@@ -1142,6 +1155,18 @@ if (isset($_GET['api'])) {
             include_once('connection.php');
             if (empty($_SESSION['username'])) { echo json_encode(['ok'=>false,'err'=>'Unauthorized']); break; }
             $conn->query("DELETE FROM nm_discovery_candidates WHERE status='rejected'");
+            echo json_encode(['ok'=>true,'deleted'=>$conn->affected_rows]);
+            break;
+
+        // ── Clear ALL candidates (wipe the list → re-discover from scratch) ────────
+        case 'clear_all_candidates':
+            if ($_SERVER['REQUEST_METHOD']!=='POST') { echo json_encode(['ok'=>false,'err'=>'POST required']); break; }
+            if (session_status()===PHP_SESSION_NONE) session_start();
+            include_once('connection.php');
+            if (empty($_SESSION['username'])) { echo json_encode(['ok'=>false,'err'=>'Unauthorized']); break; }
+            // wipe everything so the next discovery starts clean (imported nodes stay in nm_nodes;
+            // this only clears the discovery candidate list — a fresh scan re-populates it).
+            $conn->query("DELETE FROM nm_discovery_candidates");
             echo json_encode(['ok'=>true,'deleted'=>$conn->affected_rows]);
             break;
 
@@ -3104,6 +3129,9 @@ if ($_SERVER['REQUEST_METHOD']==='POST' && ($_POST['action']??'')==='save_poller
             </button>
             <button class="btn btn-danger btn-sm" onclick="clearRejected()">
                 <i class="fas fa-trash"></i> Clear Rejected
+            </button>
+            <button class="btn btn-danger btn-sm" style="border-color:#a33;color:#e88;" onclick="clearAllCandidates()">
+                <i class="fas fa-eraser"></i> Clear All
             </button>
         </div>
     </div>
@@ -5508,6 +5536,15 @@ async function rejectCandidate(id) {
 async function clearRejected() {
     if (!confirm('Remove all rejected candidates from the list?')) return;
     await fetch('net_mon_config.php?api=clear_rejected', {
+        method:'POST', credentials:'same-origin',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({})
+    }).then(r=>r.json()).catch(()=>{});
+    loadCandidates();
+}
+async function clearAllCandidates() {
+    if (!confirm('Clear the ENTIRE discovery list (pending, imported & rejected) so you can re-discover from scratch?\n\nThis does NOT remove any nodes you already imported — only the discovery candidate list. A fresh scan will re-populate it.')) return;
+    await fetch('net_mon_config.php?api=clear_all_candidates', {
         method:'POST', credentials:'same-origin',
         headers:{'Content-Type':'application/json'},
         body: JSON.stringify({})

@@ -302,6 +302,27 @@ if (!function_exists('nm_update_dir')) {
         $h = array_slice($h, 0, 30);
         nm_update_set($conn, 'update_history', json_encode($h));
     }
+
+    // Returns the version of an applied update that still needs a CONTAINER RESTART, or '' if none.
+    // A self-update copies files only — it does NOT restart the container, so the entrypoint hasn't
+    // re-run its self-heal (cron perms / DB access) and the WireGuard sidecar hasn't reconnected the
+    // tunnel that NEURU Flows ride on. We detect the pending restart by comparing the last 'applied'
+    // update time to the entrypoint's boot marker: applied AFTER the last boot (or no boot marker yet)
+    // ⇒ restart still pending. Only container-managed installs (bind-mount → web can't self-write the
+    // app dir) are affected; a bare/dev install that CAN write in-place has no container to restart.
+    function nm_update_reboot_pending($conn): string {
+        if (nm_update_can_apply_in_web()) return '';
+        $h = json_decode(nm_update_get($conn, 'update_history', '[]'), true);
+        if (!is_array($h)) return '';
+        $applied = null;
+        foreach ($h as $e) { if (($e['result'] ?? '') === 'applied') { $applied = $e; break; } }  // newest-first
+        if (!$applied) return '';
+        $boot = (string) nm_update_get($conn, 'entrypoint_booted_at', '');
+        if ($boot === '' || strtotime((string)($applied['at'] ?? '')) > strtotime($boot)) {
+            return (string)($applied['to'] ?? '');
+        }
+        return '';
+    }
     function nm_update_history($conn): array { $h = json_decode(nm_update_get($conn, 'update_history', '[]'), true); return is_array($h) ? $h : []; }
 
     // audit shim (nm_audit if present)

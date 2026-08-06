@@ -46,8 +46,27 @@ for _cf in connection connection-users; do
             -e "s|__DB_USER__|${NM_DB_USER}|g" -e "s|__DB_PASS__|${NM_DB_PASS}|g" "$_tpl" > "$_dst" \
             && echo "[entrypoint] generated ${_cf}.php from template (host=$NM_DB_HOST db=$NM_DB_NAME)"
     fi
-    chown www-data:www-data "$_dst" 2>/dev/null; chmod 640 "$_dst" 2>/dev/null
+    # Group-own by the CRON user ($NEURU_USER) so scheduled jobs can READ it. The crons run via
+    # nm_cron.sh → nm_inbound_token.php → `require connection.php` AS $NEURU_USER (e.g. 'neuru' in
+    # Docker). With the old www-data:www-data 640, that user — neither the owner nor in the www-data
+    # group — hit "Permission denied" on connection.php, so the token resolver fatally errored,
+    # nm_cron.sh got an empty token and `exit 0`-skipped EVERY tick → ALL background crons silently
+    # dead on Docker installs (the web kept working because Apache runs as www-data). www-data still
+    # OWNS it so Apache reads/writes; group=$NEURU_USER lets the cron user read; 640 keeps the DB
+    # password off world-read. Runs every boot → self-heals existing installs on restart.
+    chown "www-data:${NEURU_USER}" "$_dst" 2>/dev/null; chmod 640 "$_dst" 2>/dev/null
 done
+
+# 0a1) BOOT MARKER — record THIS container-boot time. The Updates page compares it to the last
+#      'applied' update time: if an update was applied AFTER the last boot, the container still needs
+#      a restart (so this entrypoint re-runs its self-heal AND the WireGuard sidecar reconnects the
+#      tunnel that NEURU Flows ride on). A newer boot time here makes that "restart required" banner
+#      clear itself — no manual dismissal.
+if [ -f "$APP/connection.php" ]; then
+    php -r 'require "'"$APP"'/connection.php"; $k="entrypoint_booted_at"; $t=date("c");
+        $s=$conn->prepare("INSERT INTO nm_settings (setting_key,setting_val) VALUES (?,?) ON DUPLICATE KEY UPDATE setting_val=VALUES(setting_val)");
+        if ($s) { $s->bind_param("ss",$k,$t); @$s->execute(); }' 2>/dev/null || true
+fi
 
 # 0a2) LICENSE FINGERPRINT persistence: the license binds to a machine fingerprint. In Docker the
 #      raw signals (machine-id/MAC/hostname) change on every container recreate, which would flip
