@@ -405,6 +405,10 @@ if (!function_exists('nm_gpu_ensure')) {
         $res = [];
         $r = $conn->query("SELECT * FROM nm_gpu_targets WHERE enabled=1");
         $ts = []; while ($r && ($x=$r->fetch_assoc())) $ts[]=$x;
+        // Skip targets whose linked node is in MAINTENANCE — no SSH/GPU data gathered while paused.
+        if (!function_exists('nm_maint_active_ids') && is_file(__DIR__.'/nm_maintenance.php')) require_once __DIR__.'/nm_maintenance.php';
+        if (function_exists('nm_maint_active_ids')) { $mnt=nm_maint_active_ids($conn);
+            if ($mnt) $ts=array_values(array_filter($ts, fn($t)=>empty($t['node_id'])||!isset($mnt[(int)$t['node_id']]))); }
         foreach ($ts as $t) $res[$t['id']] = nm_gpu_poll_target($conn, $t);
         return $res;
     }

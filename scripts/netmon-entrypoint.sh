@@ -63,9 +63,24 @@ done
 #      tunnel that NEURU Flows ride on). A newer boot time here makes that "restart required" banner
 #      clear itself — no manual dismissal.
 if [ -f "$APP/connection.php" ]; then
-    php -r 'require "'"$APP"'/connection.php"; $k="entrypoint_booted_at"; $t=date("c");
+    php -r 'require "'"$APP"'/connection.php";
+        // SCHEMA SELF-HEAL: enlarge nm_settings.setting_val to TEXT on OLD installs. Installers before
+        // the fix created it VARCHAR(500); with STRICT sql_mode a KB-sized value (e.g. a cached update
+        // check that carries release notes) throws "Data too long", the write is swallowed, and the
+        // Updates page renders a STALE "up to date" with no Download button. Guarded — only ALTERs when
+        // it is not already a text type. Fresh installs already ship TEXT (install SQL).
+        $r=@$conn->query("SELECT DATA_TYPE d FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=\"nm_settings\" AND COLUMN_NAME=\"setting_val\"");
+        if ($r && ($x=$r->fetch_assoc()) && stripos((string)$x["d"],"text")===false) { @$conn->query("ALTER TABLE nm_settings MODIFY setting_val TEXT"); }
+        // BOOT MARKER (drives the Updates "restart required" banner — see nm_update_reboot_pending).
+        $k="entrypoint_booted_at"; $t=date("c");
         $s=$conn->prepare("INSERT INTO nm_settings (setting_key,setting_val) VALUES (?,?) ON DUPLICATE KEY UPDATE setting_val=VALUES(setting_val)");
         if ($s) { $s->bind_param("ss",$k,$t); @$s->execute(); }' 2>/dev/null || true
+fi
+
+# 0a2b) MAINTENANCE columns on nm_nodes — so the Python pollers can skip maintenance nodes on a fresh
+#       install BEFORE any config page is opened (nm_maint_ensure also self-heals on page load).
+if [ -f "$APP/connection.php" ] && [ -f "$APP/nm_maintenance.php" ]; then
+    php -r 'require "'"$APP"'/connection.php"; require "'"$APP"'/nm_maintenance.php"; nm_maint_ensure($conn);' 2>/dev/null || true
 fi
 
 # 0a2) LICENSE FINGERPRINT persistence: the license binds to a machine fingerprint. In Docker the

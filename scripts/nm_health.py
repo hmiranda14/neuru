@@ -24,6 +24,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from nm_db_config import DB
+from nm_maint import maint_clause   # skip nodes in maintenance (no data gathered)
 import mysql.connector
 
 INTERVAL = 300  # seconds between passes in --loop mode
@@ -182,7 +183,8 @@ def run_once():
     cur.execute("""SELECT id, COALESCE(ip_address,''), COALESCE(snmp_community,''),
                           COALESCE(snmp_version,'v2c'), COALESCE(os_icon,'')
                    FROM nm_nodes
-                   WHERE COALESCE(monitor_type,'snmp')='snmp' AND snmp_community IS NOT NULL AND snmp_community<>''""")
+                   WHERE COALESCE(monitor_type,'snmp')='snmp' AND snmp_community IS NOT NULL AND snmp_community<>''"""
+                + maint_clause(cur))
     nodes = cur.fetchall()
     now_dt = datetime.now(); now_s = now_dt.strftime('%Y-%m-%d %H:%M:%S')
     total = 0

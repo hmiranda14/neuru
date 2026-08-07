@@ -19,6 +19,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 require_once __DIR__ . '/nm_audit.php';
+if (is_file(__DIR__ . '/nm_maintenance.php')) require_once __DIR__ . '/nm_maintenance.php';
 
 if (!function_exists('nm_inc_ensure')) {
     function nm_inc_ensure($conn): void {
@@ -75,6 +76,18 @@ if (!function_exists('nm_inc_ensure')) {
         return $s === 'critical' ? 'critical' : ($s === 'info' ? 'info' : 'warning');
     }
     function _inc_sev_rank($s){ return ['critical'=>3,'warning'=>2,'info'=>1][$s] ?? 1; }
+
+    // Make any source-provided text (container logs, DB errors, AI summaries — arbitrary charsets)
+    // SAFE to store. A byte-truncated multi-byte char or mojibake byte would make MySQL reject the
+    // whole row with "Incorrect string value" → which used to THROW mid-correlate and skip the
+    // auto-resolve step at the end → incidents never cleared → ZOMBIE "still down" for weeks. So:
+    // (1) drop invalid/half UTF-8 sequences, (2) char-safe truncate (never split a multi-byte char).
+    function nm_inc_clean($s, int $max = 2000): string {
+        $s = (string)$s;
+        $c = @iconv('UTF-8', 'UTF-8//IGNORE', $s);
+        if ($c !== false) $s = $c;
+        return function_exists('mb_substr') ? mb_substr($s, 0, $max, 'UTF-8') : substr($s, 0, $max);
+    }
 }
 
 // ── Collect normalized signals from every source ─────────────────────────────
@@ -109,13 +122,20 @@ if (!function_exists('nm_inc_collect')) {
                 'link'=>'live_ping.php?node='.$x['node_id']];
         } catch (\Throwable $e) {}
 
-        // 2) Container incidents
+        // 2) Container incidents — only ACTIVELY-recurring ones (last_seen recent), hard-capped.
+        // Without the recency window + LIMIT this pulled EVERY open container_incident (15k+ on a busy
+        // Portainer) as a signal EVERY run → the correlation upserted 15k rows/minute, blew past the
+        // cron timeout, and never reached the auto-resolve pass → node/container incidents stuck "open"
+        // for days even after the error stopped. An error not seen in 6h is not an active incident;
+        // it drops off here (its container_incident row still lives out its own 48h TTL for history).
         try {
             $r = $conn->query("SELECT id,container_name,host_ip,severity,error_text,ai_summary,status,first_seen,last_seen
-                FROM container_incidents WHERE status IN ('analyzing','open','acknowledged')");
+                FROM container_incidents WHERE status IN ('analyzing','open','acknowledged')
+                  AND last_seen >= (NOW() - INTERVAL 6 HOUR)
+                ORDER BY last_seen DESC LIMIT 400");
             while ($r && $x = $r->fetch_assoc()) { $chost = $hostOf($x['host_ip']); $sig[] = ['source'=>'container','severity'=>nm_inc_norm_sev($x['severity']),
                 'entity'=>$x['container_name'], 'node_id'=>$byIp($x['host_ip']), 'host'=>$chost,
-                'title'=>$x['container_name'].($chost ? ' @ '.$chost : '').': '.substr($x['ai_summary'] ?: $x['error_text'],0,120),
+                'title'=>$x['container_name'].($chost ? ' @ '.$chost : '').': '.nm_inc_clean($x['ai_summary'] ?: $x['error_text'],120),
                 'detail'=>$x['error_text'], 'fingerprint'=>'container:'.$x['id'],
                 'first_seen'=>$x['first_seen'] ?: $now, 'last_seen'=>$x['last_seen'] ?: $now,
                 'link'=>'container_errors.php?focus='.$x['id']]; }
@@ -172,7 +192,9 @@ if (!function_exists('nm_inc_collect')) {
         $sevSql = $minSev === 'critical' ? "severity='critical'"
                 : ($minSev === 'warning' ? "severity IN ('warning','critical')" : "1");
         try {
-            $r = $conn->query("SELECT id,node_id,kind,severity,title,body,created_at FROM nm_ai_insights WHERE status IN ('open','acknowledged') AND {$sevSql}");
+            // defensive cap: AI insights are expired by nm_ai_expire_stale(), but never let a runaway
+            // backlog flood the correlation (the container source taught us this the hard way).
+            $r = $conn->query("SELECT id,node_id,kind,severity,title,body,created_at FROM nm_ai_insights WHERE status IN ('open','acknowledged') AND {$sevSql} ORDER BY id DESC LIMIT 800");
             while ($r && $x = $r->fetch_assoc()) $sig[] = ['source'=>'ai','severity'=>nm_inc_norm_sev($x['severity']),
                 'entity'=>null, 'node_id'=>$x['node_id'] ? (int)$x['node_id'] : null, '_kind'=>$x['kind'],
                 'title'=>$x['title'], 'detail'=>$x['body'], 'fingerprint'=>'ai:'.$x['id'],
@@ -190,7 +212,7 @@ if (!function_exists('nm_inc_collect')) {
                     $nid = $x['node_id'] ? (int)$x['node_id'] : null;
                     if ($x['last_status'] === 'error' && $x['last_checked'] && strtotime($x['last_checked']) > time() - 600) {
                         $sig[] = ['source'=>'database','severity'=>'critical','entity'=>$x['display_name'],'node_id'=>$nid,
-                            'title'=>'Database unreachable: '.$x['display_name'], 'detail'=>substr((string)$x['last_error'],0,300),
+                            'title'=>'Database unreachable: '.$x['display_name'], 'detail'=>nm_inc_clean($x['last_error'],300),
                             'fingerprint'=>'db:'.$x['id'].':down','first_seen'=>$now,'last_seen'=>$now,'link'=>'dbmon.php?target='.(int)$x['id']];
                     }
                 }
@@ -218,7 +240,7 @@ if (!function_exists('nm_inc_collect')) {
                         if (!(int)$x['io_running'] || !(int)$x['sql_running']) {
                             $sig[] = ['source'=>'database','severity'=>'critical','entity'=>$x['display_name'],'node_id'=>$nid,
                                 'title'=>'Replication STOPPED on '.$x['display_name'].' ('.((int)$x['io_running']?'':'IO ').((int)$x['sql_running']?'':'SQL ').'thread down)',
-                                'detail'=>substr((string)$x['last_error'],0,300) ?: 'A replication thread is not running.',
+                                'detail'=>nm_inc_clean($x['last_error'],300) ?: 'A replication thread is not running.',
                                 'fingerprint'=>'db:'.$x['target_id'].':repl_stopped','first_seen'=>$now,'last_seen'=>$now,'link'=>'dbmon.php?target='.(int)$x['target_id']];
                         } elseif ($x['seconds_behind']!==null && (int)$x['seconds_behind'] >= $lagCrit) {
                             $sig[] = ['source'=>'database','severity'=>'warning','entity'=>$x['display_name'],'node_id'=>$nid,
@@ -229,6 +251,14 @@ if (!function_exists('nm_inc_collect')) {
                     }
                 }
             }
+        } catch (\Throwable $e) {}
+
+        // MAINTENANCE — drop every node-attached signal for a node in maintenance (planned downtime =
+        // no alerts, no incidents). Network-wide signals (no node_id) are untouched. One clean choke
+        // point instead of a filter on each source query.
+        try {
+            $maint = function_exists('nm_maint_active_ids') ? nm_maint_active_ids($conn) : [];
+            if ($maint) $sig = array_values(array_filter($sig, fn($s) => empty($s['node_id']) || !isset($maint[(int)$s['node_id']])));
         } catch (\Throwable $e) {}
 
         return $sig;
@@ -359,36 +389,40 @@ if (!function_exists('nm_inc_correlate')) {
         $opened = 0; $updated = 0; $resolved = 0;
         $seenKeys = [];
         foreach ($groups as $key => $sigs) {
-            $seenKeys[$key] = 1;
+            $seenKeys[$key] = 1;   // mark seen FIRST: even if this group's write hiccups, its signal IS
+                                   // present → the incident must NOT be auto-resolved by the pass below.
+          try {
+            $incId = 0;
             // root cause = highest-priority signal
             usort($sigs, fn($a,$b)=>($PRIO[$b['source']]??0) <=> ($PRIO[$a['source']]??0));
             $root = $sigs[0];
             $sev = 'info'; foreach ($sigs as $s) if (_inc_sev_rank($s['severity']) > _inc_sev_rank($sev)) $sev = $s['severity'];
             $entities = []; foreach ($sigs as $s) if (!empty($s['entity'])) $entities[$s['entity']] = 1;
             $impact = array_keys($entities);
-            $title = $root['source']==='node_down'
+            $title = nm_inc_clean($root['source']==='node_down'
                 ? ($root['entity'].' down'.(count($sigs)>1 ? ' — '.(count($sigs)-1).' related signal'.(count($sigs)>2?'s':'') : ''))
-                : $root['title'];
+                : $root['title'], 255);
 
             // upsert incident by corr_key
             $ir = $conn->query("SELECT id,status FROM nm_incidents WHERE corr_key='".$conn->real_escape_string($key)."' LIMIT 1");
             $existing = $ir ? $ir->fetch_assoc() : null;
-            $impactStr = implode(', ', array_slice($impact, 0, 30));
+            $impactStr  = nm_inc_clean(implode(', ', array_slice($impact, 0, 30)), 1000);
             $rootNodeId = $root['_root_node'] ?? ($root['node_id'] ?? null);
-            $rootHost   = $root['host'] ?? null;   // which host the root signal (container/config) lives on
+            $rootEntity = nm_inc_clean($root['entity'] ?? '', 255);
+            $rootHost   = isset($root['host']) && $root['host'] !== null ? nm_inc_clean($root['host'], 255) : null;
             if ($existing) {
                 $incId = (int)$existing['id'];
                 $newStatus = $existing['status'] === 'resolved' ? 'open' : $existing['status']; // reopen if it had cleared
                 if ($existing['status'] === 'resolved') $opened++; else $updated++;
                 $st = $conn->prepare("UPDATE nm_incidents SET title=?,severity=?,status=?,root_source=?,root_entity=?,root_host=?,root_node_id=?,signal_count=?,impact_count=?,impact=?,updated_at=?,resolved_at=NULL WHERE id=?");
                 $cnt = count($sigs); $impc = count($impact);
-                $st->bind_param('ssssssiiissi', $title,$sev,$newStatus,$root['source'],$root['entity'],$rootHost,$rootNodeId,$cnt,$impc,$impactStr,$now,$incId);
+                $st->bind_param('ssssssiiissi', $title,$sev,$newStatus,$root['source'],$rootEntity,$rootHost,$rootNodeId,$cnt,$impc,$impactStr,$now,$incId);
                 $st->execute(); $st->close();
             } else {
                 $st = $conn->prepare("INSERT INTO nm_incidents (corr_key,title,severity,status,root_source,root_entity,root_host,root_node_id,signal_count,impact_count,impact,opened_at,updated_at)
                                       VALUES (?,?,?,'open',?,?,?,?,?,?,?,?,?)");
                 $cnt = count($sigs); $impc = count($impact);
-                $st->bind_param('ssssssiiisss', $key,$title,$sev,$root['source'],$root['entity'],$rootHost,$rootNodeId,$cnt,$impc,$impactStr,$now,$now);
+                $st->bind_param('ssssssiiisss', $key,$title,$sev,$root['source'],$rootEntity,$rootHost,$rootNodeId,$cnt,$impc,$impactStr,$now,$now);
                 $st->execute(); $incId = $st->insert_id; $st->close();
                 $opened++;
             }
@@ -397,21 +431,31 @@ if (!function_exists('nm_inc_correlate')) {
             $fps = [];
             foreach ($sigs as $s) {
                 $fps[$s['fingerprint']] = 1;
-                $u = $conn->prepare("INSERT INTO nm_incident_signals (incident_id,fingerprint,source,severity,entity,node_id,title,detail,link,status,first_seen,last_seen)
-                                     VALUES (?,?,?,?,?,?,?,?,?,'active',?,?)
-                                     ON DUPLICATE KEY UPDATE incident_id=VALUES(incident_id),severity=VALUES(severity),title=VALUES(title),detail=VALUES(detail),link=VALUES(link),status='active',last_seen=VALUES(last_seen),cleared_at=NULL");
-                $nid    = !empty($s['node_id']) ? (int)$s['node_id'] : null;   // null → SQL NULL
-                $entity = $s['entity'] ?? null;
-                $det    = substr((string)($s['detail'] ?? ''), 0, 2000);
-                $fs     = $s['first_seen'] ?: $now;
-                $ls     = $s['last_seen']  ?: $now;
-                $u->bind_param('issssisssss', $incId, $s['fingerprint'], $s['source'], $s['severity'], $entity, $nid, $s['title'], $det, $s['link'], $fs, $ls);
-                $u->execute(); $u->close();
+                try {
+                    $u = $conn->prepare("INSERT INTO nm_incident_signals (incident_id,fingerprint,source,severity,entity,node_id,title,detail,link,status,first_seen,last_seen)
+                                         VALUES (?,?,?,?,?,?,?,?,?,'active',?,?)
+                                         ON DUPLICATE KEY UPDATE incident_id=VALUES(incident_id),severity=VALUES(severity),title=VALUES(title),detail=VALUES(detail),link=VALUES(link),status='active',last_seen=VALUES(last_seen),cleared_at=NULL");
+                    $nid      = !empty($s['node_id']) ? (int)$s['node_id'] : null;   // null → SQL NULL
+                    $entity   = nm_inc_clean($s['entity'] ?? '', 255); if ($entity === '') $entity = null;
+                    $sigTitle = nm_inc_clean($s['title'] ?? '', 255);
+                    $det      = nm_inc_clean($s['detail'] ?? '', 2000);
+                    $fs       = $s['first_seen'] ?: $now;
+                    $ls       = $s['last_seen']  ?: $now;
+                    $u->bind_param('issssisssss', $incId, $s['fingerprint'], $s['source'], $s['severity'], $entity, $nid, $sigTitle, $det, $s['link'], $fs, $ls);
+                    $u->execute(); $u->close();
+                } catch (\Throwable $e) {
+                    // A single poisoned signal (bad encoding, oversize, …) must NEVER abort the whole
+                    // correlation — that is exactly what used to skip the auto-resolve pass below and
+                    // leave incidents stuck "open" for weeks. Skip it and keep going.
+                }
             }
             // clear signals attached to this incident that weren't seen now
             $inList = "'" . implode("','", array_map([$conn,'real_escape_string'], array_keys($fps))) . "'";
-            $conn->query("UPDATE nm_incident_signals SET status='cleared', cleared_at='$now'
+            if ($incId) $conn->query("UPDATE nm_incident_signals SET status='cleared', cleared_at='$now'
                           WHERE incident_id=$incId AND status='active' AND fingerprint NOT IN ($inList)");
+          } catch (\Throwable $e) {
+            // Never let one bad group abort the whole correlation — the auto-resolve pass MUST run.
+          }
         }
 
         // auto-resolve incidents whose corr_key wasn't seen this round (all signals gone).

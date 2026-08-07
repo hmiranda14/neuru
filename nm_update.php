@@ -87,7 +87,14 @@ if (!function_exists('nm_update_dir')) {
         $r = nm_update_http_get($url);
         nm_update_set($conn, 'update_last_check', date('c'));
         if (empty($r['json'])) return ['ok'=>false, 'error'=>$r['error'] ?? 'no response from portal'];
-        nm_update_set($conn, 'update_last_result', json_encode($r['json']));
+        // Cache a SLIM copy — release notes can be KB-sized and overflow nm_settings.setting_val on
+        // older installs (VARCHAR(500) + STRICT sql_mode → the cache write throws, gets swallowed, and
+        // the Updates page keeps rendering the STALE previous result: shows "up to date" with no
+        // Download button even though a signed new build IS available). The card only needs the
+        // availability + download coordinates; the notes come from the live check. Keep the FULL notes
+        // in the returned value so a fresh check still displays them.
+        $slim = $r['json']; unset($slim['notes'], $slim['release_notes']);
+        try { nm_update_set($conn, 'update_last_result', json_encode($slim)); } catch (\Throwable $e) {}
         return $r['json'] + ['ok'=>true, 'current'=>$cur, 'channel'=>$chan];
     }
     // last cached check result (for banners / cron), without hitting the network
@@ -200,6 +207,10 @@ if (!function_exists('nm_update_dir')) {
         nm_update_record_history($conn, $old, $ver, 'applied');
         nm_update_set($conn, 'update_staged', '');
         nm_update_set($conn, 'update_pending', '');
+        // Clear the last check result so the Updates page doesn't render a STALE "update available"
+        // for the version we JUST installed (the pre-update check cached "vX available"; without this
+        // the card shows a phantom update to the current version until the next manual check).
+        nm_update_set($conn, 'update_last_result', '');
         nm_audit_safe($conn, 'update.applied', ['from'=>$old, 'to'=>$ver, 'files'=>$copied]);
         return ['ok'=>true, 'version'=>$ver, 'from'=>$old, 'files'=>$copied, 'backup'=>basename($backup),
                 'note'=>'Update applied + health-checked. Verify the app, then remove old backups from updates/backups/ when happy.'];

@@ -10,9 +10,11 @@ import json
 import time
 import re
 import subprocess
+import threading
 import mysql.connector
 from datetime import datetime
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
 
 BASE_DIR   = Path(__file__).resolve().parent.parent
 CFG_FILE   = BASE_DIR / 'librenms_config.json'   # optional — only used if present and enabled
@@ -20,6 +22,7 @@ LOG_PREFIX = '[nm_poller]'
 
 # ─── DB credentials (filled in by install.sh via nm_db_config.py) ─────────────
 from nm_db_config import DB
+from nm_maint import maint_clause   # skip nodes in maintenance (no data gathered / no down-alerts)
 
 # ─── Logging ──────────────────────────────────────────────────────────────────
 def log(msg):
@@ -27,6 +30,23 @@ def log(msg):
 
 def get_db():
     return mysql.connector.connect(**DB, autocommit=False)
+
+
+def worker_count(cur, n_nodes):
+    """SNMP concurrency = operator override (nm_settings.poll_workers) or auto: min(50, max(8, nodes/5)).
+    Capped at 50 by default because each worker holds ONE DB connection (vs MySQL max_connections) and
+    does heavy per-node work; the subprocess SNMP calls release the GIL so ~50 gives real parallelism.
+    Never more workers than nodes."""
+    if n_nodes <= 0:
+        return 1
+    try:
+        cur.execute("SELECT setting_val FROM nm_settings WHERE setting_key='poll_workers' LIMIT 1")
+        row = cur.fetchone()
+        if row and str(row[0]).strip().isdigit() and int(row[0]) > 0:
+            return min(int(row[0]), n_nodes)
+    except Exception:
+        pass
+    return min(50, max(8, n_nodes // 5), n_nodes)
 
 # ─── Optional LibreNMS helper (fallback only) ─────────────────────────────────
 def load_lnms_cfg():
@@ -1088,7 +1108,18 @@ def detect_alerts(cur):
             cur.execute("SELECT TIMESTAMPDIFF(MINUTE, %s, NOW())", (newest,))
             snmp_age[node_id] = cur.fetchone()[0]
 
+    # Nodes in MAINTENANCE are neither polled nor judged — never raise a down/degraded verdict for
+    # them (the UI paints them as "maintenance", overriding any last verdict). Auto-clears by time.
+    maint_ids = set()
+    try:
+        cur.execute("SELECT id FROM nm_nodes WHERE maintenance_until IS NOT NULL AND maintenance_until > NOW()")
+        maint_ids = {r[0] for r in cur.fetchall()}
+    except Exception:
+        maint_ids = set()   # maintenance_until column not present on this (older) install
+
     for node_id in (set(ping_recent) | set(snmp_age)):
+        if node_id in maint_ids:
+            continue
         nname    = names.get(node_id, f"Node {node_id}")
         samples  = ping_recent.get(node_id, [])
         has_ping = len(samples) > 0
@@ -1168,8 +1199,8 @@ def poll(only_node=None):
                COALESCE(n.snmp_version, 'v2c')  snmp_version,
                n.display_name
         FROM nm_nodes n
-        WHERE COALESCE(n.monitor_type, 'snmp') <> 'ping'
-    """
+        WHERE COALESCE(n.monitor_type, 'snmp') NOT IN ('ping','agent')
+    """ + maint_clause(cur, 'n')
     if only_node:
         cur.execute(_node_sql + " AND n.id=%s ORDER BY n.id", (int(only_node),))
     else:
@@ -1182,7 +1213,22 @@ def poll(only_node=None):
     ports_done = 0
     errors     = 0
 
-    for (node_id, dev_id, node_ip, snmp_comm, snmp_ver, display_name) in nodes:
+    # Each worker thread gets its OWN DB connection (reused across the nodes it handles, closed after
+    # the pool) — the per-node functions write throughout, so this parallelises without a giant
+    # gather/write rewrite. snmpwalk/ping are external processes → they release the GIL → real speedup.
+    _tls = threading.local()
+    _wconns = []
+    _wlock = threading.Lock()
+    def _wdb():
+        if getattr(_tls, 'db', None) is None:
+            _tls.db = get_db(); _tls.cur = _tls.db.cursor()
+            with _wlock: _wconns.append(_tls.db)
+        return _tls.db, _tls.cur
+
+    def _do_node(node):
+        node_id, dev_id, node_ip, snmp_comm, snmp_ver, display_name = node
+        db, cur = _wdb()
+        nodes_done = 0; ports_done = 0; errors = 0
         log(f"  Node {node_id} — {display_name} ({node_ip})")
 
         if snmp_comm and node_ip:
@@ -1216,7 +1262,7 @@ def poll(only_node=None):
                 log(f"    ping-sample error: {e}")
             if not alive:
                 log(f"    UNREACHABLE (ICMP {loss:.0f}% loss + SNMP timeout) — skipping SNMP; marked for down-detection")
-                continue
+                return (nodes_done, ports_done, errors)
 
             # Auto-discover interfaces if we have none with if_index set
             cur.execute("""
@@ -1336,6 +1382,19 @@ def poll(only_node=None):
             try: db.rollback()
             except Exception: pass
         nodes_done += 1
+        return (nodes_done, ports_done, errors)
+
+    # Fan the per-node polls across a thread pool (was sequential → one slow/down node stalled the
+    # whole cycle; hours at 2 000 nodes). Each snmpwalk/ping is an external process → true parallelism.
+    nw = worker_count(cur, len(nodes))
+    log(f"  Polling {len(nodes)} node(s) with {nw} worker(s)")
+    if nodes:
+        with ThreadPoolExecutor(max_workers=nw) as ex:
+            for (nd, pd, er) in ex.map(_do_node, nodes):
+                nodes_done += nd; ports_done += pd; errors += er
+    for _c in _wconns:
+        try: _c.close()
+        except Exception: pass
 
     # ── Native alert engine: detect interface/device down→up changes → insights ─
     # Retry on deadlock — the per-host (win/linux/gpu) crons write the same tables, so a

@@ -11,6 +11,8 @@ require_once __DIR__ . '/nm_geomap.php';   // node geo (coords) + GeoIP auto-loc
 require_once __DIR__ . '/nm_nodemeta.php'; // device classification + asset fields (model/serial/warranty/photo)
 require_once __DIR__ . '/nm_media.php';    // secure image upload (equipment photos)
 require_once __DIR__ . '/nm_license.php';  // node-limit enforcement (best-effort; no-op unless enforced)
+require_once __DIR__ . '/nm_maintenance.php'; // per-node maintenance mode (Unmanage/Pause)
+nm_maint_ensure($conn);                    // ensure maintenance columns exist (guarded)
 nm_node_meta_ensure($conn);
 $_lnms_cfg = nm_lnms_get($conn);
 
@@ -77,6 +79,25 @@ if (isset($_GET['api'])) {
             echo json_encode($r && isset($r['status'])
                 ? ['ok'=>true,'ver'=>$r['librenms_ver']??'?','db'=>$r['db_schema']??'?']
                 : ['ok'=>false,'err'=>'Cannot reach '.NMC_URL]);
+            break;
+        // ── Per-node maintenance mode (Unmanage/Pause) ────────────────────────
+        case 'node_maintenance':
+            if (($_SERVER['REQUEST_METHOD'] ?? 'GET') !== 'POST') { echo json_encode(['ok'=>false,'err'=>'POST required']); break; }
+            if (session_status() === PHP_SESSION_NONE) session_start();
+            include_once __DIR__ . '/connection.php';
+            require_once __DIR__ . '/nm_maintenance.php';
+            if (empty($_SESSION['username'])) { echo json_encode(['ok'=>false,'err'=>'Unauthorized']); break; }
+            $b   = json_decode(file_get_contents('php://input'), true) ?: [];
+            $nid = (int)($b['node_id'] ?? 0);
+            $by  = (string)($_SESSION['username'] ?? '');
+            if ($nid <= 0) { echo json_encode(['ok'=>false,'err'=>'missing node_id']); break; }
+            if (($b['op'] ?? 'set') === 'clear') {
+                $ok = nm_maint_clear($conn, $nid, $by);
+            } else {
+                $until = trim((string)($b['until'] ?? ''));            // '' = indefinite
+                $ok = nm_maint_set($conn, $nid, $until !== '' ? $until : null, (string)($b['reason'] ?? ''), $by);
+            }
+            echo json_encode($ok ? ['ok'=>true] : ['ok'=>false,'err'=>'update failed']);
             break;
         case 'devices':
             $r = nmc_call('/api/v0/devices');
@@ -264,7 +285,7 @@ if (isset($_GET['api'])) {
             include_once('connection.php');
             if (empty($_SESSION['username'])) { echo json_encode(['ok'=>false,'err'=>'Unauthorized']); break; }
             $body = json_decode(file_get_contents('php://input'), true) ?? [];
-            $allowed = ['poll_interval_health','poll_interval_ifaces','retention_days',
+            $allowed = ['poll_interval_health','poll_interval_ifaces','retention_days','poll_workers',
                         'discovery_enabled','discovery_schedule','discovery_subnets','discovery_communities',
                         'snmp_timeout','snmp_retries','ping_fail_threshold','snmp_stale_minutes'];
             $saved = 0;
@@ -1520,7 +1541,7 @@ if ($_SERVER['REQUEST_METHOD']==='POST') {
     }
 
     if ($act==='save_settings') {
-        $allowed = ['poll_interval_health','poll_interval_ifaces','retention_days',
+        $allowed = ['poll_interval_health','poll_interval_ifaces','retention_days','poll_workers',
                     'discovery_enabled','discovery_schedule','discovery_subnets','discovery_communities',
                     'snmp_timeout','snmp_retries','app_timezone','ping_fail_threshold','snmp_stale_minutes'];
         foreach ($allowed as $key) {
@@ -1670,6 +1691,7 @@ $groups = $conn->query("SELECT * FROM nm_groups ORDER BY sort_order,name")->fetc
 $nodes  = $conn->query("SELECT n.id,n.lnms_device_id,n.display_name,n.ip_address,n.os_icon,
     n.snmp_community,n.snmp_version,n.oid_template_id,n.subnet_mask,n.gateway_node_id,n.gateway_iface_id,n.group_id,n.monitor_type,
     n.photo_path,n.manufacturer,n.model,n.serial_number,n.asset_tag,n.purchase_date,n.warranty_expiry,n.asset_notes,
+    n.maintenance_until,n.maintenance_since,n.maintenance_reason,n.maintenance_by,
     g.name grp_name,g.color grp_color
     FROM nm_nodes n LEFT JOIN nm_groups g ON g.id=n.group_id
     ORDER BY g.sort_order,n.sort_order,n.display_name")->fetch_all(MYSQLI_ASSOC);
@@ -2208,6 +2230,9 @@ input:checked+.toggle-slider::before{transform:translateX(20px);}
                     $snmp_bg     = $has_snmp ? 'rgba(46,204,113,.12)' : 'rgba(243,156,18,.12)';
                     $snmp_txt    = $has_snmp ? htmlspecialchars($nd['snmp_community']).' / '.($nd['snmp_version']?:'v2c') : 'no SNMP';
                     $icon_cls    = $icon_map[$nd['os_icon']??''] ?? 'fas fa-server';
+                    $mUntil  = $nd['maintenance_until'] ?? null;
+                    $inMaint = $mUntil && strtotime($mUntil) > time();
+                    $mIndef  = $inMaint && substr((string)$mUntil,0,4) >= '2999';
                 ?>
                 <div class="nm-node" data-s="<?= htmlspecialchars(strtolower(trim(($nd['display_name']??'').' '.($nd['ip_address']??'').' '.($nd['snmp_community']??'')))) ?>">
                 <div class="node-row">
@@ -2217,17 +2242,41 @@ input:checked+.toggle-slider::before{transform:translateX(20px);}
                     <span style="font-size:10px;padding:2px 8px;border-radius:6px;background:<?= $snmp_bg ?>;color:<?= $snmp_color ?>;white-space:nowrap;">
                         <?= $snmp_txt ?>
                     </span>
+                    <?php if ($inMaint): ?>
+                    <span style="font-size:10px;padding:2px 8px;border-radius:6px;background:rgba(243,156,18,.16);color:#f39c12;white-space:nowrap;" title="No data is being gathered from this node">
+                        <i class="fas fa-screwdriver-wrench"></i> Maintenance<?= $mIndef?'':' · until '.htmlspecialchars(substr((string)$mUntil,0,16)) ?>
+                    </span>
+                    <?php endif; ?>
                     <button class="btn btn-primary btn-sm" onclick="toggleEditForm(<?= $nd['id'] ?>)" title="Edit device">
                         <i class="fas fa-pen"></i>
                     </button>
                     <button class="btn btn-primary btn-sm" onclick="showTab('interfaces');setIfaceNode(<?= $nd['id'] ?>)" title="Interfaces">
                         <i class="fas fa-ethernet"></i>
                     </button>
+                    <button class="btn btn-sm" style="background:<?= $inMaint?'rgba(243,156,18,.9)':'rgba(243,156,18,.14)' ?>;color:<?= $inMaint?'#111':'#f39c12' ?>;border:1px solid rgba(243,156,18,.4);" onclick="toggleMaint(<?= $nd['id'] ?>)" title="Maintenance mode (pause monitoring)">
+                        <i class="fas fa-screwdriver-wrench"></i>
+                    </button>
                     <form method="post" style="margin:0;" onsubmit="return confirm('Remove <?= htmlspecialchars(addslashes($nd['display_name'])) ?>?')">
                         <input type="hidden" name="action" value="del_node">
                         <input type="hidden" name="node_id" value="<?= $nd['id'] ?>">
                         <button type="submit" class="btn btn-danger btn-sm"><i class="fas fa-trash"></i></button>
                     </form>
+                </div>
+                <!-- Inline maintenance panel (Unmanage / Pause) -->
+                <div id="maint-panel-<?= $nd['id'] ?>" style="display:none;background:rgba(243,156,18,.06);border:1px solid rgba(243,156,18,.28);border-radius:8px;padding:12px 14px;margin:4px 0 6px;">
+                    <?php if ($inMaint): ?>
+                        <div style="font-size:12px;color:#f0c674;margin-bottom:8px;"><i class="fas fa-screwdriver-wrench"></i> <b>In maintenance</b><?= $mIndef?' (indefinite)':' until <b>'.htmlspecialchars(substr((string)$mUntil,0,16)).'</b>' ?><?= $nd['maintenance_reason']?' — '.htmlspecialchars($nd['maintenance_reason']):'' ?><?= $nd['maintenance_by']?' · by '.htmlspecialchars($nd['maintenance_by']):'' ?>. NEURU is gathering <b>no data</b> from this node.</div>
+                        <button class="btn btn-primary btn-sm" onclick="clearMaint(<?= $nd['id'] ?>)"><i class="fas fa-play"></i> Resume monitoring</button>
+                    <?php else: ?>
+                        <div style="font-size:11px;color:#aaa;margin-bottom:8px;">Pause monitoring: NEURU stops gathering data from this node (no metrics, no alerts) and shows it as <span style="color:#f39c12">🔧 maintenance</span> everywhere. SLA is not penalized. Leave "until" empty for indefinite.</div>
+                        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end;">
+                            <div><label style="font-size:10px;color:#aaa;text-transform:uppercase;display:block;margin-bottom:3px;">Until (optional)</label>
+                                <input type="datetime-local" id="maint-until-<?= $nd['id'] ?>" class="form-input" style="font-size:12px;padding:6px 10px;"></div>
+                            <div style="flex:1;min-width:160px;"><label style="font-size:10px;color:#aaa;text-transform:uppercase;display:block;margin-bottom:3px;">Reason (optional)</label>
+                                <input type="text" id="maint-reason-<?= $nd['id'] ?>" class="form-input" placeholder="e.g. planned reboot / firmware upgrade" style="font-size:12px;padding:6px 10px;"></div>
+                            <button class="btn btn-sm" style="background:#f39c12;color:#111;" onclick="setMaint(<?= $nd['id'] ?>)"><i class="fas fa-pause"></i> Enter maintenance</button>
+                        </div>
+                    <?php endif; ?>
                 </div>
                 <!-- Inline full-edit form -->
                 <div id="edit-form-<?= $nd['id'] ?>" style="display:none;background:rgba(77,163,255,.04);border:1px solid rgba(77,163,255,.2);border-radius:8px;padding:14px;margin:4px 0 6px;">
@@ -2601,6 +2650,8 @@ if ($conn->query("SHOW TABLES LIKE 'nm_poller_config'")->num_rows > 0) {
 }
 $poll_interval  = $poll_cfg['interval_minutes'] ?? '5';
 $poll_retention = $poll_cfg['retention_days']   ?? '30';
+$poll_workers   = '';
+if ($__pwq = $conn->query("SELECT setting_val FROM nm_settings WHERE setting_key='poll_workers' LIMIT 1")) { if ($__pwx = $__pwq->fetch_assoc()) $poll_workers = (string)$__pwx['setting_val']; }
 $poll_log = [];
 if ($conn->query("SHOW TABLES LIKE 'nm_poller_log'")->num_rows > 0) {
     $pl_res = $conn->query("SELECT * FROM nm_poller_log ORDER BY ran_at DESC LIMIT 15");
@@ -2618,8 +2669,26 @@ if ($_SERVER['REQUEST_METHOD']==='POST' && ($_POST['action']??'')==='save_poller
                   ON DUPLICATE KEY UPDATE cfg_value='$int'");
     $conn->query("INSERT INTO nm_poller_config(cfg_key,cfg_value) VALUES('retention_days','$ret')
                   ON DUPLICATE KEY UPDATE cfg_value='$ret'");
+    // Concurrency (workers) → nm_settings.poll_workers (where nm_ping.py / nm_poller.py read it). '' = auto.
+    $pwv = (string)($_POST['poll_workers'] ?? '');
+    $pwv = ($pwv !== '' && ctype_digit($pwv) && (int)$pwv > 0) ? (string)min(500, (int)$pwv) : '';
+    $conn->query("INSERT INTO nm_settings(setting_key,setting_val) VALUES('poll_workers','".$conn->real_escape_string($pwv)."')
+                  ON DUPLICATE KEY UPDATE setting_val=VALUES(setting_val)");
     header('Location: net_mon_config.php?tab=poller&saved=1'); exit;
 }
+// ── Remote Agents (neuru-agent): token + list ───────────────────────────────
+require_once __DIR__ . '/nm_agent.php';
+if ($_SERVER['REQUEST_METHOD']==='POST' && ($_POST['action']??'')==='agent_token_rotate') {
+    nm_agent_token_rotate($conn);
+    header('Location: net_mon_config.php?tab=poller&agtok=1'); exit;
+}
+$agent_token = nm_agent_token($conn);
+if ($agent_token === '') { $agent_token = nm_agent_token_rotate($conn); }   // mint on first view
+$agent_list  = nm_agent_list($conn);
+// Portal-facing base URL an agent should POST to (best-effort from the current request).
+$agent_scheme = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS']!=='off') ? 'https' : 'http';
+$agent_host   = $_SERVER['HTTP_HOST'] ?? 'your-neuru-host';
+$agent_base   = $agent_scheme.'://'.$agent_host;
 ?>
 <!-- ─── Connections (manual topology wiring) ──────────────────────────────── -->
 <div id="tab-links" class="tab-panel <?= $tab==='links'?'active':'' ?>">
@@ -2738,6 +2807,16 @@ if ($_SERVER['REQUEST_METHOD']==='POST' && ($_POST['action']??'')==='save_poller
                 </select>
                 <div style="font-size:11px;color:#555;margin-top:4px;">Older data is automatically pruned each poll cycle.</div>
             </div>
+            <div>
+                <label class="form-label">Poller Concurrency (parallel workers)</label>
+                <select name="poll_workers" class="form-select">
+                    <option value="" <?= ($poll_workers===''||$poll_workers==='0')?'selected':'' ?>>Auto — scales with node count (recommended)</option>
+                    <?php foreach ([10,25,50,75,100,150,200] as $w): ?>
+                    <option value="<?= $w ?>" <?= $poll_workers===(string)$w?'selected':'' ?>><?= $w ?> workers</option>
+                    <?php endforeach ?>
+                </select>
+                <div style="font-size:11px;color:#555;margin-top:4px;">How many nodes the SNMP &amp; ping pollers probe <b>in parallel</b>. <b>Auto</b> scales with your node count (≈ nodes/5, capped 50 SNMP / 100 ping). Raise it for thousands of nodes on a strong server — each SNMP worker uses one DB connection, so keep it under your MySQL <code>max_connections</code>.</div>
+            </div>
             <button type="submit" class="btn btn-primary" style="align-self:flex-start;">
                 <i class="fas fa-floppy-disk"></i> Save Poller Config
             </button>
@@ -2813,6 +2892,116 @@ if ($_SERVER['REQUEST_METHOD']==='POST' && ($_POST['action']??'')==='save_poller
     No poll history yet. Run the poller script to start collecting data.
 </div>
 <?php endif ?>
+
+<!-- ═══ Remote Agents (neuru-agent) ═══════════════════════════════════════════ -->
+<div class="glass-card" style="margin-top:20px;">
+    <h3 style="margin:0 0 6px;font-size:14px;color:var(--accent);display:flex;align-items:center;gap:8px;">
+        <i class="fas fa-satellite-dish"></i> Remote Agents <span style="font-size:10px;background:rgba(126,231,135,.18);color:#9df0a5;padding:2px 8px;border-radius:10px;">NEURU-AGENT</span>
+    </h3>
+    <p style="font-size:12px;color:#889;margin:0 0 16px;max-width:820px;">
+        A featherweight container on any remote Linux box (or fleet of them) that <b>pushes</b> CPU / memory / disk /
+        network / sensors + Docker stats to NEURU over outbound HTTPS — no inbound firewall rule, no SSH key, works behind
+        NAT/CGNAT. Agents <b>offload polling from this server</b>, so you scale to thousands of nodes. Each registers itself
+        with the enrollment token below and appears in the <a href="linux.php" style="color:var(--accent);">Linux Monitor</a>.
+    </p>
+    <?php if (!empty($_GET['agtok'])): ?>
+    <div class="alert-ok" style="margin-bottom:12px;"><i class="fas fa-check"></i> Enrollment token rotated — existing agents must be updated with the new token.</div>
+    <?php endif ?>
+
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px;align-items:start;">
+      <!-- Token + compose -->
+      <div>
+        <label class="form-label">Enrollment Token</label>
+        <div style="display:flex;gap:8px;align-items:center;margin-bottom:6px;">
+            <input id="agtok" type="text" readonly value="<?= htmlspecialchars($agent_token) ?>"
+                   class="form-input" style="font-family:monospace;font-size:11px;color:#9df0a5;flex:1;">
+            <button class="btn btn-sm" type="button" onclick="agCopy('agtok')"><i class="fas fa-copy"></i></button>
+            <form method="post" style="margin:0;" onsubmit="return confirm('Rotate the token? Every existing agent stops reporting until updated with the new token.');">
+                <input type="hidden" name="action" value="agent_token_rotate">
+                <button class="btn btn-sm" type="submit" title="Rotate"><i class="fas fa-rotate"></i></button>
+            </form>
+        </div>
+        <div style="font-size:11px;color:#667;margin-bottom:16px;">Shared secret every agent presents in the <code>X-NEURU-Agent-Token</code> header. Rotate to revoke all agents at once.</div>
+
+        <label class="form-label">Endpoint</label>
+        <div style="display:flex;gap:8px;align-items:center;margin-bottom:16px;">
+            <input id="agurl" type="text" readonly value="<?= htmlspecialchars($agent_base) ?>/nm_agent_api.php"
+                   class="form-input" style="font-family:monospace;font-size:11px;color:#4da3ff;flex:1;">
+            <button class="btn btn-sm" type="button" onclick="agCopy('agurl')"><i class="fas fa-copy"></i></button>
+        </div>
+      </div>
+
+      <!-- docker-compose -->
+      <div>
+        <label class="form-label">Install on a remote box — <code>docker compose up -d</code></label>
+        <div style="position:relative;">
+          <button class="btn btn-sm" type="button" onclick="agCopy('agcompose')" style="position:absolute;top:8px;right:8px;z-index:2;"><i class="fas fa-copy"></i> Copy</button>
+          <textarea id="agcompose" readonly rows="16" class="form-input"
+            style="font-family:monospace;font-size:10.5px;color:#cdd6e4;line-height:1.5;width:100%;resize:vertical;background:rgba(0,0,0,.5);"># docker-compose.yml — NEURU remote agent
+services:
+  neuru-agent:
+    image: ghcr.io/hmiranda14/neuru-agent:latest
+    container_name: neuru-agent
+    restart: unless-stopped
+    pid: host                 # read host CPU/mem/procs via /proc
+    network_mode: host        # report host network counters
+    environment:
+      NEURU_URL: "<?= htmlspecialchars($agent_base) ?>/nm_agent_api.php"
+      NEURU_TOKEN: "<?= htmlspecialchars($agent_token) ?>"
+      # NEURU_HOSTNAME: "web-01"   # optional; defaults to the box hostname
+      NEURU_INTERVAL: "30"          # seconds between pushes
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/host/root:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro   # optional: container stats
+</textarea>
+        </div>
+        <div style="font-size:11px;color:#667;margin-top:6px;">Paste into <code>docker-compose.yml</code> on the target box and run <code>docker compose up -d</code>. The agent self-registers within ~30s.</div>
+      </div>
+    </div>
+
+    <!-- Registered agents -->
+    <h4 style="margin:22px 0 10px;font-size:12px;color:#8aa;text-transform:uppercase;letter-spacing:1px;">
+        <i class="fas fa-list"></i> Registered Agents (<?= count($agent_list) ?>)
+    </h4>
+    <?php if ($agent_list): ?>
+    <table style="width:100%;border-collapse:collapse;font-size:12px;">
+        <thead><tr>
+            <?php foreach (['Host','IP','Version','Last Seen','Status'] as $h): ?>
+            <th style="color:#556;font-size:10px;text-transform:uppercase;letter-spacing:1px;padding:6px 10px;text-align:left;border-bottom:1px solid var(--border);"><?= $h ?></th>
+            <?php endforeach ?>
+        </tr></thead>
+        <tbody>
+        <?php foreach ($agent_list as $a):
+            $age = $a['age']; $online = ($age !== null && $age < 120);
+            $seen = $a['agent_last_seen'] ? (($age!==null && $age<60) ? 'just now' : (($age!==null?($age<3600?floor($age/60).'m':($age<86400?floor($age/3600).'h':floor($age/86400).'d')):'').' ago')) : 'never';
+        ?>
+        <tr style="border-bottom:1px solid rgba(255,255,255,.04);">
+            <td style="padding:6px 10px;color:#cdd; "><i class="fab fa-linux" style="color:#8aa;margin-right:6px;"></i><?= htmlspecialchars($a['name']) ?></td>
+            <td style="padding:6px 10px;color:#889;font-family:monospace;"><?= htmlspecialchars($a['host_ip']??'—') ?></td>
+            <td style="padding:6px 10px;color:#889;"><?= htmlspecialchars($a['agent_version']??'—') ?: '—' ?></td>
+            <td style="padding:6px 10px;color:#889;"><?= htmlspecialchars($seen) ?></td>
+            <td style="padding:6px 10px;">
+                <span style="background:<?= $online?'rgba(46,204,113,.2)':'rgba(243,156,18,.2)' ?>;color:<?= $online?'#2ecc71':'#f39c12' ?>;padding:2px 8px;border-radius:10px;font-size:10px;"><?= $online?'online':'stale' ?></span>
+            </td>
+        </tr>
+        <?php endforeach ?>
+        </tbody>
+    </table>
+    <?php else: ?>
+    <div style="text-align:center;padding:24px;color:#556;font-size:12px;">
+        <i class="fas fa-satellite-dish" style="font-size:24px;margin-bottom:8px;display:block;opacity:.5;"></i>
+        No agents yet. Deploy the compose file above on a remote box to enroll one.
+    </div>
+    <?php endif ?>
+</div>
+
+<script>
+function agCopy(id){ var el=document.getElementById(id); el.select(); el.setSelectionRange(0,99999);
+  try{ navigator.clipboard.writeText(el.value); }catch(e){ document.execCommand('copy'); }
+}
+</script>
 
 </div><!-- /tab-poller -->
 
@@ -4219,6 +4408,28 @@ function toggleEditForm(nodeId) {
     });
     const el = document.getElementById('edit-form-' + nodeId);
     if (el) el.style.display = el.style.display === 'none' ? 'block' : 'none';
+}
+
+// ── Per-node Maintenance (Unmanage / Pause) ───────────────────────────────────
+function toggleMaint(nodeId) {
+    document.querySelectorAll('[id^="maint-panel-"]').forEach(el => { if (el.id !== 'maint-panel-' + nodeId) el.style.display = 'none'; });
+    const el = document.getElementById('maint-panel-' + nodeId);
+    if (el) el.style.display = el.style.display === 'none' ? 'block' : 'none';
+}
+async function setMaint(nodeId) {
+    const until  = (document.getElementById('maint-until-'  + nodeId)||{}).value || '';
+    const reason = (document.getElementById('maint-reason-' + nodeId)||{}).value || '';
+    const r = await fetch('net_mon_config.php?api=node_maintenance', {method:'POST', credentials:'same-origin',
+        headers:{'Content-Type':'application/json'}, body: JSON.stringify({op:'set', node_id:nodeId, until, reason})})
+        .then(r=>r.json()).catch(()=>({ok:false}));
+    if (r.ok) location.reload(); else alert('Failed: ' + (r.err||'?'));
+}
+async function clearMaint(nodeId) {
+    if (!confirm('Resume monitoring this node? Data collection restarts immediately.')) return;
+    const r = await fetch('net_mon_config.php?api=node_maintenance', {method:'POST', credentials:'same-origin',
+        headers:{'Content-Type':'application/json'}, body: JSON.stringify({op:'clear', node_id:nodeId})})
+        .then(r=>r.json()).catch(()=>({ok:false}));
+    if (r.ok) location.reload(); else alert('Failed: ' + (r.err||'?'));
 }
 
 // ── Auto-locate node coordinates from its IP (GeoIP — public IPs only) ─────────

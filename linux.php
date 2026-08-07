@@ -347,7 +347,7 @@ async function loadHosts(){
   document.getElementById('hosts').innerHTML = HOSTS.length? HOSTS.map(h=>`
     <div class="glass hcard">
       <div class="nm"><i class="fab fa-linux" style="color:var(--win)"></i> ${esc(h.name)} ${h.err24>0?`<span class="tt" style="background:rgba(231,76,60,.18);color:#f0a59d;">${h.err24} err/24h</span>`:''}</div>
-      <div class="meta">${esc(h.node_name||h.host_ip||'—')} · ${h.event_count} events stored · <span class="tt" style="background:${h.source==='alloy'?'rgba(247,103,7,.18);color:#ffb877':'rgba(58,160,255,.18);color:#9cc8ff'};">${h.source==='alloy'?'via Alloy':'via SSH'}</span></div>
+      <div class="meta">${esc(h.node_name||h.host_ip||'—')} · ${h.event_count} events stored · <span class="tt" style="background:${h.source==='agent'?'rgba(126,231,135,.18);color:#9df0a5':h.source==='alloy'?'rgba(247,103,7,.18);color:#ffb877':'rgba(58,160,255,.18);color:#9cc8ff'};">${h.source==='agent'?'via Agent':h.source==='alloy'?'via Alloy':'via SSH'}</span></div>
       <div class="st ${esc(h.status)}">● ${esc((h.status||'').toUpperCase())}${h.status!=='down'&&h.last_error?' — '+esc((h.last_error||'').slice(0,70)):(h.status==='down'?' — host unreachable (powered off?)':'')}</div>
       <div class="meta">last pull ${h.last_event_poll?esc(nmLocal(h.last_event_poll)):'—'}</div>
       <div style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap;">

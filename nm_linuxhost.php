@@ -271,6 +271,13 @@ if (!function_exists('nm_lx_ensure')) {
     }
     function nm_lx_diagnose($conn, array $h): array {
         nm_lx_ensure($conn);
+        // PER-HOST source: 'agent' → the box pushes its own telemetry (never SSH it);
+        // serve the last pushed sample as the live diagnostics view.
+        if (($h['source'] ?? 'ssh') === 'agent') {
+            $hg = nm_lx_health_get($conn, (int)$h['id']);
+            if (empty($hg['has']) || !is_array($hg['data'])) return ['ok'=>false,'error'=>'No agent telemetry received yet.'];
+            return ['ok'=>true, 'data'=>$hg['data'], 'host'=>$h['name']??'', 'age'=>$hg['age']??null, 'via'=>'agent'];
+        }
         // PER-HOST source: 'alloy' → scrape that box's Grafana Alloy; else SSH bash.
         if (($h['source'] ?? 'ssh') === 'alloy') {
             $g = _nm_lx_gather_diag_alloy($conn, $h);
@@ -428,7 +435,9 @@ if (!function_exists('nm_lx_ensure')) {
         return $ok?['ok'=>true,'killed'=>$n]:['ok'=>false,'error'=>'SSH failed']; }
 
     // ── Cron orchestration + prune ────────────────────────────────────────────
-    function nm_lx_poll_all($conn): array { nm_lx_ensure($conn); $r=$conn->query("SELECT * FROM nm_lx_hosts WHERE enabled=1"); $hs=[]; while($r && ($x=$r->fetch_assoc()))$hs[]=$x;
+    function nm_lx_poll_all($conn): array { nm_lx_ensure($conn); $r=$conn->query("SELECT * FROM nm_lx_hosts WHERE enabled=1 AND COALESCE(source,'ssh')<>'agent'"); $hs=[]; while($r && ($x=$r->fetch_assoc()))$hs[]=$x;   // agent hosts PUSH their own telemetry — never SSH them
+        if (!function_exists('nm_maint_active_ids') && is_file(__DIR__.'/nm_maintenance.php')) require_once __DIR__.'/nm_maintenance.php';
+        if (function_exists('nm_maint_active_ids')) { $mnt=nm_maint_active_ids($conn); if($mnt) $hs=array_values(array_filter($hs, fn($h)=>empty($h['node_id'])||!isset($mnt[(int)$h['node_id']]))); }  // skip nodes in maintenance
         $ev=0;$he=0;$wc=0; foreach($hs as $h){ $a=nm_lx_poll_events($conn,$h); if(!empty($a['ok']))$ev++; $b=nm_lx_poll_health($conn,$h); if(!empty($b['ok']))$he++; $c=nm_lx_watch_check($conn,$h); if(!empty($c['ok']))$wc++; }
         nm_lx_prune($conn); return['ok'=>true,'hosts'=>count($hs),'events_ok'=>$ev,'health_ok'=>$he,'watch_ok'=>$wc]; }
     function nm_lx_prune($conn,int $days=30): void { nm_lx_ensure($conn); $d=max(1,$days); $conn->query("DELETE FROM nm_lx_events WHERE created_at < (UTC_TIMESTAMP() - INTERVAL $d DAY)"); $conn->query("DELETE FROM nm_lx_actions WHERE created_at < (UTC_TIMESTAMP() - INTERVAL $d DAY)"); }

@@ -218,6 +218,10 @@ if (!function_exists('nm_win_ensure')) {
         $res = []; $hs = [];
         $r = $conn->query("SELECT * FROM nm_win_hosts WHERE enabled=1");
         while ($r && ($x=$r->fetch_assoc())) $hs[] = $x;
+        // Skip hosts whose linked node is in MAINTENANCE — no SSH data gathered while paused.
+        if (!function_exists('nm_maint_active_ids') && is_file(__DIR__.'/nm_maintenance.php')) require_once __DIR__.'/nm_maintenance.php';
+        if (function_exists('nm_maint_active_ids')) { $mnt = nm_maint_active_ids($conn);
+            if ($mnt) $hs = array_values(array_filter($hs, fn($h) => empty($h['node_id']) || !isset($mnt[(int)$h['node_id']]))); }
         foreach ($hs as $h) {
             $res[$h['id']] = nm_win_poll_events($conn, $h);
             // health is heavier → refresh at most ~every 10 min per host

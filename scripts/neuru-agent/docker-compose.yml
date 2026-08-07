@@ -1,0 +1,25 @@
+# docker-compose.yml — NEURU remote agent
+#
+# 1. Copy this file to the box you want to monitor.
+# 2. Set NEURU_URL + NEURU_TOKEN (from NEURU → Config → Poller → Remote Agents).
+# 3. docker compose up -d
+#
+# The agent self-registers within ~30s and shows up in NEURU's Linux Monitor.
+services:
+  neuru-agent:
+    image: ghcr.io/hmiranda14/neuru-agent:latest
+    container_name: neuru-agent
+    restart: unless-stopped
+    pid: host                 # read host CPU / memory / processes via /proc
+    network_mode: host        # report host network counters
+    environment:
+      NEURU_URL: "https://YOUR-NEURU-HOST/nm_agent_api.php"
+      NEURU_TOKEN: "PASTE-ENROLLMENT-TOKEN"
+      # NEURU_HOSTNAME: "web-01"     # optional; defaults to the box hostname
+      NEURU_INTERVAL: "30"           # seconds between pushes
+      # NEURU_VERIFY_TLS: "0"        # uncomment if NEURU uses a self-signed cert
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/host/root:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro   # optional: per-container stats

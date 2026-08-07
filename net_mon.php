@@ -522,12 +522,20 @@ while ($adr && ($ax = $adr->fetch_assoc())) {
     if ($ax['last_status'] === 'degraded') $NM_DEGRADED[(int)$ax['node_id']] = 1;
     else $NM_DOWN[(int)$ax['node_id']] = 1;
 }
+// Nodes in MAINTENANCE — a distinct state (not up, not down). No data is gathered while paused;
+// the card shows "maintenance" and the node is excluded from the up/down summary (and from SLA).
+$MAINT = [];
+try { $mr = $conn->query("SELECT id FROM nm_nodes WHERE maintenance_until IS NOT NULL AND maintenance_until > NOW()");
+      while ($mr && ($mx = $mr->fetch_row())) $MAINT[(int)$mx[0]] = 1; } catch (\Throwable $e) {}
 foreach ($NM_NODES as $did => $nd) {
     $ndid = (int)($nd['id'] ?? 0);
     if (!$ndid || !empty($device_map[$did])) continue;   // skip if LibreNMS already supplied it
 
-    // ── Ping-only nodes: status + latency from nm_ping_stats (no SNMP) ─────────
-    if (($nd['monitor_type'] ?? 'snmp') === 'ping') {
+    // ── Ping-only + agent nodes: status + latency from nm_ping_stats (no SNMP) ──
+    // Agent nodes push a heartbeat (is_up=1) into nm_ping_stats each cycle → same up/down
+    // logic; their rich CPU/mem/disk telemetry renders in the Linux Monitor (linux.php).
+    if (in_array(($nd['monitor_type'] ?? 'snmp'), ['ping','agent'], true)) {
+        $_mt = ($nd['monitor_type'] ?? 'snmp');
         $pr = $conn->query(
             "SELECT is_up, latency_ms, packet_loss, recorded_at,
                     TIMESTAMPDIFF(SECOND, recorded_at, NOW()) AS age_s FROM nm_ping_stats
@@ -538,10 +546,12 @@ foreach ($NM_NODES as $did => $nd) {
         // regardless of whether the writer used PHP-local or MySQL/UTC time. ≤10 min.
         $fresh = $p && $p['age_s'] !== null && (int)$p['age_s'] <= 600;
         $ping_up = ($p && (int)$p['is_up'] === 1 && $fresh);
+        $inMaint = !empty($MAINT[$ndid]);
         $device_map[$did] = [
             'device_id'   => $ndid,
-            'status'      => $ping_up ? 1 : 0,
-            'state'       => $ping_up ? 'up' : 'down',
+            'status'      => $inMaint ? 2 : ($ping_up ? 1 : 0),
+            'state'       => $inMaint ? 'maintenance' : ($ping_up ? 'up' : 'down'),
+            'maintenance' => $inMaint,
             'uptime'      => 0,
             'latency'     => $p ? $p['latency_ms'] : null,
             'packet_loss' => $p ? $p['packet_loss'] : null,
@@ -550,8 +560,8 @@ foreach ($NM_NODES as $did => $nd) {
             'ip'          => $nd['ip_address'],
             'location'    => $nd['location'] ?: null,
             'last_polled' => $p['recorded_at'] ?? null,
-            'type'        => 'ping',
-            'monitor'     => 'ping',
+            'type'        => $_mt,
+            'monitor'     => $_mt,
         ];
         $health_map[$did] = ['cpu' => [], 'mem' => [], 'storage' => [], 'other' => []];
         continue;
@@ -625,15 +635,17 @@ foreach ($NM_NODES as $did => $nd) {
     //   degraded → pings fine but SNMP telemetry stale → amber, status 1 (still REACHABLE)
     //   up       → fresh data and no verdict           → green, status 1
     //   (stale & no verdict yet → conservative down until the engine catches up)
-    if (!empty($NM_DOWN[$ndid]))          { $state_str = 'down';     $is_up = false; }
+    if (!empty($MAINT[$ndid]))            { $state_str = 'maintenance'; $is_up = false; }
+    elseif (!empty($NM_DOWN[$ndid]))      { $state_str = 'down';     $is_up = false; }
     elseif (!empty($NM_DEGRADED[$ndid]))  { $state_str = 'degraded'; $is_up = true;  }
     elseif ($fresh)                       { $state_str = 'up';       $is_up = true;  }
     else                                  { $state_str = 'down';     $is_up = false; }
 
     $device_map[$did] = [
         'device_id'   => $ndid,
-        'status'      => $is_up ? 1 : 0,
+        'status'      => $state_str === 'maintenance' ? 2 : ($is_up ? 1 : 0),
         'state'       => $state_str,
+        'maintenance' => ($state_str === 'maintenance'),
         'uptime'      => $uptime_secs,
         'sysName'     => $nd['hostname'] ?: $nd['display_name'],
         'hostname'    => $nd['hostname'] ?: $nd['ip_address'],
@@ -648,11 +660,13 @@ foreach ($NM_NODES as $did => $nd) {
 }
 
 // ─── Summary Counts ───────────────────────────────────────────────────────────
-$summary = ['up' => 0, 'down' => 0, 'unknown' => 0, 'ports_up' => 0, 'ports_down' => 0, 'alerts' => count($alerts)];
+$summary = ['up' => 0, 'down' => 0, 'maintenance' => 0, 'unknown' => 0, 'ports_up' => 0, 'ports_down' => 0, 'alerts' => count($alerts)];
 foreach ($DEVICES as $id => $def) {
     $d = $device_map[$id] ?? null;
     if (!$d) { $summary['unknown']++; continue; }
-    if ((int)$d['status'] === 1) $summary['up']++; else $summary['down']++;
+    if (($d['state'] ?? '') === 'maintenance') $summary['maintenance']++;   // paused → not up, not down
+    elseif ((int)$d['status'] === 1) $summary['up']++;
+    else $summary['down']++;
 }
 foreach ($ports_map as $ports) {
     if (!$ports) continue;
@@ -733,7 +747,7 @@ if (($_GET['api'] ?? '') === 'live') {
     usort($tt, fn($a, $b) => $b['total'] <=> $a['total']);
     echo json_encode([
         'ok' => true, 'ts' => time(),
-        'summary'  => ['up'=>$summary['up'], 'down'=>$summary['down'], 'unknown'=>$summary['unknown'],
+        'summary'  => ['up'=>$summary['up'], 'down'=>$summary['down'], 'maintenance'=>$summary['maintenance'], 'unknown'=>$summary['unknown'],
                        'ports_up'=>$summary['ports_up'], 'ports_down'=>$summary['ports_down'],
                        'cont_up'=>$summary['cont_up'], 'cont_down'=>$summary['cont_down'], 'cont_on'=>$summary['cont_on']],
         'devices'  => $live_devices,
@@ -813,6 +827,8 @@ if (empty($videoFile)) $videoFile = !empty($_SESSION['user_bgsite_video']) ? $_S
         .device-card.status-up    { border-left: 3px solid var(--up); }
         .device-card.status-down  { border-left: 3px solid var(--down); }
         .device-card.status-degraded { border-left: 3px solid var(--warn); }
+        .device-card.status-degraded { border-left: 3px solid var(--warn); }
+        .device-card.status-maintenance { border-left: 3px solid #f39c12; opacity: .82; }
         .device-card.status-unknown { border-left: 3px solid #666; }
         .device-card-name { font-weight: 700; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding-right: 20px; }
         .device-card-ip   { font-size: 11px; color: #aaa; font-family: monospace; }
@@ -820,6 +836,7 @@ if (empty($videoFile)) $videoFile = !empty($_SESSION['user_bgsite_video']) ? $_S
         .status-dot.up      { background: var(--up);   box-shadow: 0 0 6px var(--up); }
         .status-dot.down    { background: var(--down); box-shadow: 0 0 6px var(--down); animation: blink 1s infinite; }
         .status-dot.degraded{ background: var(--warn); box-shadow: 0 0 6px var(--warn); animation: blink 2.2s infinite; }
+        .status-dot.maintenance{ background: #f39c12; box-shadow: 0 0 6px #f39c12; }
         .status-dot.unknown { background: #555; }
         @keyframes blink { 0%,100% { opacity: 1; } 50% { opacity: 0.3; } }
         .device-card-meta { font-size: 10px; color: #777; margin-top: 6px; display: flex; flex-wrap: wrap; gap: 6px; }
@@ -1255,7 +1272,7 @@ if (empty($videoFile)) $videoFile = !empty($_SESSION['user_bgsite_video']) ? $_S
                 <?php
                 // Ping-only devices have no interfaces — give them a direct button to
                 // the real-time ICMP monitor instead of the (empty) interface views.
-                $_isPingCard = (($NM_NODES[$id]['monitor_type'] ?? '') === 'ping') || ($def['os_icon'] === 'ping');
+                $_isPingCard = in_array(($NM_NODES[$id]['monitor_type'] ?? ''), ['ping','agent'], true) || ($def['os_icon'] === 'ping');
                 $_pingNodeId = (int)($NM_NODES[$id]['id'] ?? 0);
                 if ($_isPingCard && $_pingNodeId): ?>
                 <a href="live_ping.php?node=<?= $_pingNodeId ?>" onclick="event.stopPropagation();"
@@ -1510,8 +1527,9 @@ if (empty($videoFile)) $videoFile = !empty($_SESSION['user_bgsite_video']) ? $_S
                 else                 $p_down++;
             }
 
-            $has_issue    = ($p_down > 0 || $status_str === 'down' || $status_str === 'degraded');
-            $left_color   = $status_str === 'up' ? 'var(--up)' : ($status_str === 'down' ? 'var(--down)' : ($status_str === 'degraded' ? 'var(--warn)' : '#555'));
+            $inMaint      = ($status_str === 'maintenance');
+            $has_issue    = (!$inMaint && ($p_down > 0 || $status_str === 'down' || $status_str === 'degraded'));
+            $left_color   = $inMaint ? '#f39c12' : ($status_str === 'up' ? 'var(--up)' : ($status_str === 'down' ? 'var(--down)' : ($status_str === 'degraded' ? 'var(--warn)' : '#555')));
 
             $graphs = [];
             if ($def['os_icon'] !== 'ping') {
@@ -1532,6 +1550,9 @@ if (empty($videoFile)) $videoFile = !empty($_SESSION['user_bgsite_video']) ? $_S
                     <span style="font-family:monospace;color:#555;font-size:12px;">[<?= $id ?>]</span>
                     <span style="font-size:14px;"><?= htmlspecialchars($def['name']) ?></span>
                     <span style="font-size:12px;color:#888;font-family:monospace;"><?= htmlspecialchars($def['ip']) ?></span>
+                    <?php if ($inMaint): ?>
+                        <span style="font-size:11px;padding:2px 8px;border-radius:6px;background:rgba(243,156,18,.18);color:#f39c12;font-weight:600;white-space:nowrap;" title="Monitoring paused — no data is being gathered from this node"><i class="fas fa-screwdriver-wrench"></i> Maintenance</span>
+                    <?php endif; ?>
                     <?php if ($d && !empty($d['hardware'])): ?>
                         <span style="font-size:11px;color:#aaa;"><?= htmlspecialchars($d['hardware']) ?></span>
                     <?php elseif ($def['hw'] !== '—'): ?>
@@ -1795,7 +1816,7 @@ if (empty($videoFile)) $videoFile = !empty($_SESSION['user_bgsite_video']) ? $_S
                     <!-- Tab: Graphs (Chart.js from DB) ──────────────────────── -->
                     <?php
                     $node_id_g   = (int)($NM_NODES[$id]['id'] ?? 0);
-                    $_isPingG    = ($NM_NODES[$id]['monitor_type'] ?? 'snmp') === 'ping';
+                    $_isPingG    = in_array(($NM_NODES[$id]['monitor_type'] ?? 'snmp'), ['ping','agent'], true);
                     $dev_ifaces  = array_values(array_filter($NM_IFACES[$id] ?? [], fn($i) => (int)$i['show_graph'] === 1));
                     $ports_json  = htmlspecialchars(json_encode(array_map(
                         fn($i) => ['pid'=>(int)$i['id'], 'name'=>$i['display_name']?:$i['if_name']?:"Port {$i['id']}"],
@@ -2130,7 +2151,7 @@ async function pollNow(nodeId, btn){
         const d = await r.json().catch(()=>null);
         if (d && d.ok) {
             // PRECISE verdict — no more ambiguous "Updated". Say exactly what the device is.
-            const map = { up:['● UP','#2ecc71'], degraded:['⚠ REACHABLE · SNMP STALE','#f39c12'], down:['● DOWN','#e74c3c'] };
+            const map = { up:['● UP','#2ecc71'], degraded:['⚠ REACHABLE · SNMP STALE','#f39c12'], maintenance:['🔧 MAINTENANCE','#f39c12'], down:['● DOWN','#e74c3c'] };
             const m = map[d.state] || ['Updated','#4da3ff'];
             if (lbl) lbl.textContent = m[0];
             btn.style.color = m[1]; btn.style.borderColor = m[1];
@@ -2571,10 +2592,10 @@ function applyAutoRefresh() {
       const card = document.querySelector('.device-card[data-dev="'+id+'"]');
       if(!card) continue;
       // status
-      card.classList.remove('status-up','status-down','status-degraded','status-unknown');
+      card.classList.remove('status-up','status-down','status-degraded','status-maintenance','status-unknown');
       card.classList.add('status-'+dev.status);
       const dot = card.querySelector('.status-dot');
-      if(dot){ dot.classList.remove('up','down','degraded','unknown'); dot.classList.add(dev.status); }
+      if(dot){ dot.classList.remove('up','down','degraded','maintenance','unknown'); dot.classList.add(dev.status); }
       // cpu / mem
       if(dev.cpu!=null){ const b=card.querySelector('.cpu-bar'), v=card.querySelector('.cpu-val');
         if(b) b.style.width=dev.cpu+'%'; if(b) b.style.background=cpuColor(dev.cpu);
@@ -2601,7 +2622,7 @@ function applyAutoRefresh() {
     // ── accordion ROW headers — keep each node's row in lock-step with its card ──
     // (the row used to freeze at page-load state until a full reload; now it tracks
     //  the SAME authoritative status the card does, every poll → no card/row drift)
-    const stColor = st => st==='up' ? '#2ecc71' : st==='down' ? '#e74c3c' : st==='degraded' ? '#f39c12' : '#555';
+    const stColor = st => st==='up' ? '#2ecc71' : st==='down' ? '#e74c3c' : (st==='degraded'||st==='maintenance') ? '#f39c12' : '#555';
     for(const id in devs){
       const dev = devs[id];
       const hdr = document.getElementById('acchdr-'+id);

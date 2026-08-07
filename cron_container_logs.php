@@ -116,6 +116,31 @@ if (_cl_get($conn, 'error_watch_enabled', '1') !== '0') {
     $split = fn($s) => array_values(array_filter(array_map('trim', preg_split('/[,\n]/', (string)$s))));
     $kw = $split(_cl_get($conn, 'error_watch_keywords', 'ERROR,ERR,FAILED'));
     $ig = $split(_cl_get($conn, 'error_watch_ignore', ''));
+    // A keyword-matched line is often NOT a real error. Incidents must be strictly ERROR/WARN-and-above,
+    // never NOTICE/INFO/DEBUG. `_cl_is_noise` filters the three real-world false-positive shapes we hit:
+    //   1) a rendered HTML page captured as a log line (an app's 500 page) — has the word "error" but
+    //      isn't a log error;
+    //   2) a NEGATED/success status line — ofelia/systemd/etc. log a SUCCESSFUL job as
+    //      `NOTICE … Finished … failed: false, error: none` (also `errors=0`, `no errors`);
+    //   3) an INFO-LEVEL line — the FIRST severity token is notice/info/debug/trace (routine logging,
+    //      incl. job stdout/stderr capture like `NOTICE [Job x] StdErr: …`), regardless of inner words.
+    //      "StdErr"/"StdOut" are stream NAMES (contain "err") — stripped so they don't read as errors.
+    $isNoise = function (string $low): bool {
+        $t = ltrim($low);
+        if (strpos($t, '<!doctype') === 0 || strpos($t, '<html') === 0
+            || (strpos($t, '<head') !== false && strpos($t, '<title') !== false)) return true;   // (1) HTML page
+        $s = str_replace(['stderr', 'stdout'], ' ', $low);                                        // stream names ≠ errors
+        $n = 0;
+        $s = preg_replace('/\b(errors?|err|failed|failures?|fatal)\s*[:=]\s*(?:"|\')?(false|none|nil|null|<nil>|0|no|ok|success)\b/', ' ', $s, -1, $n) ?? $s;
+        $s = preg_replace('/\b(no|zero|0)\s+(errors?|failures?)\b/', ' ', $s) ?? $s;
+        $real = false;
+        foreach (['error','err','fail','fatal','panic','exception','critical','traceback','segfault','warn'] as $k)
+            if (strpos($s, $k) !== false) { $real = true; break; }
+        if ($n > 0 && !$real) return true;                                                        // (2) negated-only status line
+        if (preg_match('/\b(emerg|alert|crit|critical|error|fatal|panic|warn|warning|notice|info|debug|trace)\b/', $s, $m)
+            && in_array($m[1], ['notice','info','debug','trace'], true)) return true;             // (3) info-level line
+        return false;
+    };
     if ($kw) {
         // cursor = last container_logs.id scanned. First run seeds at the current MAX so we detect only
         // NEW lines from here on (never backfill/flood the whole history into incidents).
@@ -153,6 +178,7 @@ if (_cl_get($conn, 'error_watch_enabled', '1') !== '0') {
             if (!$hit) continue;
             if ($ig) foreach ($ig as $g) { if ($g !== '' && strpos($low, strtolower($g)) !== false) { $hit = false; break; } }
             if (!$hit) continue;
+            if ($isNoise($low)) continue;   // HTML page / negated-success / info-level line → not a real error
             $ew['errors']++;
             $errText = substr(trim($msg), 0, 4000);
             $cname = (string)$lg['container_name'];

@@ -206,8 +206,16 @@ function render(s){
   else document.getElementById('reboot').style.display='none';
 }
 
+// numeric dotted-version compare: returns true if a > b (e.g. verGt('0.1.1.58','0.1.1.57'))
+function verGt(a,b){ const pa=String(a==null?'':a).split('.').map(n=>parseInt(n,10)||0), pb=String(b==null?'':b).split('.').map(n=>parseInt(n,10)||0);
+  for(let i=0;i<Math.max(pa.length,pb.length);i++){ const x=pa[i]||0,y=pb[i]||0; if(x!==y) return x>y; } return false; }
+
 function showAvail(r, cur){
   const a=document.getElementById('avail'); a.style.display='block';
+  // Guard against a STALE cached check: never offer an update to a version we're already on (or past).
+  // After an in-place update the pre-update check result can linger ("available vX" for the version we
+  // just installed) — only show Download when the offered version is strictly newer than installed.
+  if(r.update_available && cur && !verGt(r.version, cur)){ r = {ok:true, update_available:false, latest:r.version}; }
   if(r.update_available){
     LATEST=r;
     a.innerHTML = `<div class="row"><span class="pill up"><i class="fa-solid fa-arrow-up"></i> Update available</span>
