@@ -1529,7 +1529,13 @@ function nm_ap2_propose_action($conn, int $sid, string $tool, array $args, strin
     // Two-way Telegram approval (exactly like the v1 aiopilot): if THIS device opted in, push the proposed
     // action to Telegram with Approve/Deny buttons; the reply is handled by the shared poller (nm_aip_tg_poll
     // → ap2: branch). The operator can also Approve/Deny in the cockpit Approvals tab.
-    $tgSent=false; if (!empty($dev['telegram_approve']) && $aid) { try { $t=nm_ap2_tg_notify_action($conn,$aid); $tgSent=!empty($t['ok']); } catch (\Throwable $e) {} }
+    // SEND to Telegram when EITHER this device opted in OR the Telegram notification channel is enabled
+    // install-wide → the Approvals panel and Telegram stay in SYNC whenever Telegram is on (and stay silent
+    // on installs where Telegram isn't enabled, e.g. the other test boxes). The reply is handled by the
+    // shared poller (cron_aip_telegram → nm_aip_tg_poll → ap2: branch).
+    $tgSent=false;
+    $tgOn = !empty($dev['telegram_approve']) || (function_exists('nm_aip_tg_channel') && nm_aip_tg_channel($conn));
+    if ($tgOn && $aid) { try { $t=nm_ap2_tg_notify_action($conn,$aid); $tgSent=!empty($t['ok']); } catch (\Throwable $e) {} }
     return ['ok'=>true,'status'=>'proposed','needs_approval'=>true,'recurrence'=>$rec,'telegram'=>$tgSent];
 }
 
@@ -1661,6 +1667,24 @@ function nm_ap2_do_fw_apply($conn, array $args): array {
     }
     return ['ok'=>true,'output'=>$op.' on '.$node['display_name'].'/'.$table.' applied + confirmed (Safe-Apply). '.substr((string)($r['desc'] ?? ''), 0, 140)];
 }
+// Advance a signal OUT of 'proposed'/'investigating' once its action(s) reached a terminal state
+// (done/denied/failed) and nothing is still pending. Without this a signal shows "AWAITING YOU"
+// forever after its action already ran or was denied (the stuck-honeypot bug). Safe: only settles
+// when there is at least one finished action and zero still-pending — never touches live proposals.
+function nm_ap2_settle_signal($conn, int $sigid): void {
+    if ($sigid <= 0) return;
+    try {
+        $q = $conn->query("SELECT
+            COALESCE(SUM(status IN('proposed','approved','executing')),0) pend,
+            COALESCE(SUM(status IN('done','denied','failed')),0) term
+            FROM nm_ap2_actions WHERE signal_id=" . (int)$sigid);
+        $row = $q ? $q->fetch_assoc() : null;
+        if ($row && (int)$row['pend'] === 0 && (int)$row['term'] > 0) {
+            $conn->query("UPDATE nm_ap2_signals SET status='acted' WHERE id=" . (int)$sigid . " AND status IN('proposed','investigating')");
+        }
+    } catch (\Throwable $e) {}
+}
+
 function nm_ap2_execute_action($conn, int $aid): array {
     // ATOMIC single-flight: only ONE caller can move an action out of 'approved'/'proposed' into 'executing'.
     // This defeats the double-execution race (cockpit Approve + Telegram tap at once) — the loser's CAS matches
@@ -1682,6 +1706,8 @@ function nm_ap2_execute_action($conn, int $aid): array {
     $ok=!empty($res['ok']); $out=substr((string)($res['output']??($res['error']??'')),0,3000);
     try { $st=$conn->prepare("UPDATE nm_ap2_actions SET status=?, result=? WHERE id=?"); $stt=$ok?'done':'failed'; $st->bind_param('ssi',$stt,$out,$aid); $st->execute(); $st->close(); } catch (\Throwable $e) {}
     nm_ap2_event($conn,(int)$a['session_id'],$node,'result',($ok?'✓ ':'✗ ').$a['tool'].': '.$out);
+    // once the action finished, clear its signal from "AWAITING YOU" (any path: cockpit/Telegram/auto)
+    if (!empty($a['signal_id'])) nm_ap2_settle_signal($conn,(int)$a['signal_id']);
     if (function_exists('nm_audit')) { try { nm_audit($conn,'ap2.execute',['tool'=>$a['tool'],'node'=>$node,'ok'=>$ok]); } catch (\Throwable $e) {} }
     return ['ok'=>$ok,'output'=>$out];
 }
@@ -1719,6 +1745,13 @@ function nm_ap2_pace($conn, bool $force=false): array {
     // stale tap says "already handled" instead of re-applying.
     try { $conn->query("UPDATE nm_ap2_actions a LEFT JOIN nm_ap2_signals s ON s.id=a.signal_id SET a.status='denied' WHERE a.status='proposed' AND (s.id IS NULL OR s.status IN('resolved','ignored'))"); } catch (\Throwable $e) {}
     try { $conn->query("UPDATE nm_ap2_tg_approvals t LEFT JOIN nm_ap2_actions a ON a.id=t.action_id SET t.status='expired' WHERE t.status='pending' AND (a.id IS NULL OR a.status<>'proposed')"); } catch (\Throwable $e) {}
+    // SETTLE stuck 'proposed' signals: their action(s) already finished (done/denied/failed) with none
+    // still pending → advance to 'acted' so they stop showing "AWAITING YOU" forever. Catch-all safety net
+    // for any execution path that resolved an action without settling its signal (the stuck-honeypot bug).
+    try { $conn->query("UPDATE nm_ap2_signals s SET s.status='acted'
+        WHERE s.status='proposed'
+          AND EXISTS (SELECT 1 FROM nm_ap2_actions a WHERE a.signal_id=s.id AND a.status IN('done','denied','failed'))
+          AND NOT EXISTS (SELECT 1 FROM nm_ap2_actions a WHERE a.signal_id=s.id AND a.status IN('proposed','approved','executing'))"); } catch (\Throwable $e) {}
     // reconcile ORPHANED 'investigating' signals: session finished/reaped/gone but the signal never left
     // 'investigating' (e.g. finish hit a uq_fp_open collision). done→resolved, reaped→retry as 'new'.
     // Collision-safe (collapse sibling-fingerprint rows first) and per-row so one bad row can't block the rest.

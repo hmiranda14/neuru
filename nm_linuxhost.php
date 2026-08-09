@@ -58,7 +58,8 @@ if (!function_exists('nm_lx_ensure')) {
             WHERE NOT EXISTS (SELECT 1 FROM role_profiles WHERE role_name='admin' AND button_key='linux')");
         // Per-host data source (Phase 3): 'ssh' (default) or 'alloy' (Grafana Alloy scrape).
         // Guarded ALTER (mysqli is in EXCEPTION mode → must check before adding).
-        foreach (['source'=>"VARCHAR(8) NOT NULL DEFAULT 'ssh'", 'alloy_url'=>"VARCHAR(255) NULL"] as $col=>$def) {
+        // agent_ssh_events: HYBRID — source='agent' (push metrics) but ALSO pull journal events over SSH.
+        foreach (['source'=>"VARCHAR(8) NOT NULL DEFAULT 'ssh'", 'alloy_url'=>"VARCHAR(255) NULL", 'agent_ssh_events'=>"TINYINT(1) NOT NULL DEFAULT 0"] as $col=>$def) {
             $c=$conn->query("SELECT COUNT(*) c FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='nm_lx_hosts' AND COLUMN_NAME='$col'");
             if ($c && (int)$c->fetch_assoc()['c']===0) $conn->query("ALTER TABLE nm_lx_hosts ADD COLUMN $col $def");
         }
@@ -81,19 +82,24 @@ if (!function_exists('nm_lx_ensure')) {
     }
     function nm_lx_host($conn,int $id): ?array { nm_lx_ensure($conn);
         $r=$conn->query("SELECT * FROM nm_lx_hosts WHERE id=".(int)$id." LIMIT 1"); return $r?($r->fetch_assoc()?:null):null; }
-    function _nm_lx_src($v){ return ($v==='alloy')?'alloy':'ssh'; }
+    function _nm_lx_src($v){ return ($v==='alloy')?'alloy':(($v==='agent')?'agent':'ssh'); }
     function nm_lx_host_add($conn, array $f, ?int $uid): array { nm_lx_ensure($conn);
         $name=substr(trim((string)($f['name']??'')),0,120); if($name==='')return['ok'=>false,'error'=>'Name required'];
         $nid=($f['node_id']??'')!==''?(int)$f['node_id']:null; $ip=substr(trim((string)($f['host_ip']??'')),0,64)?:null;
         if(!$nid && !$ip) return['ok'=>false,'error'=>'Pick a node or enter a host IP'];
         $src=_nm_lx_src($f['source']??'ssh'); $au=substr(trim((string)($f['alloy_url']??'')),0,255)?:null;
-        $st=$conn->prepare("INSERT INTO nm_lx_hosts (name,node_id,host_ip,source,alloy_url,enabled,created_by) VALUES (?,?,?,?,?,1,?)");
-        $st->bind_param('sisssi',$name,$nid,$ip,$src,$au,$uid); $st->execute(); return['ok'=>true,'id'=>$conn->insert_id]; }
+        $hev=(!empty($f['agent_ssh_events'])&&$f['agent_ssh_events']!=='0')?1:0;   // hybrid: agent metrics + SSH journal events
+        $st=$conn->prepare("INSERT INTO nm_lx_hosts (name,node_id,host_ip,source,alloy_url,agent_ssh_events,enabled,created_by) VALUES (?,?,?,?,?,?,1,?)");
+        $st->bind_param('sisssii',$name,$nid,$ip,$src,$au,$hev,$uid); $st->execute(); return['ok'=>true,'id'=>$conn->insert_id]; }
     function nm_lx_host_update($conn,int $id,array $f): array { nm_lx_ensure($conn);
         $name=substr(trim((string)($f['name']??'')),0,120); $nid=($f['node_id']??'')!==''?(int)$f['node_id']:null; $ip=substr(trim((string)($f['host_ip']??'')),0,64)?:null;
         $src=_nm_lx_src($f['source']??'ssh'); $au=substr(trim((string)($f['alloy_url']??'')),0,255)?:null;
-        $st=$conn->prepare("UPDATE nm_lx_hosts SET name=?,node_id=?,host_ip=?,source=?,alloy_url=? WHERE id=?");
-        $st->bind_param('sisssi',$name,$nid,$ip,$src,$au,$id); $st->execute(); return['ok'=>true]; }
+        $hev=(!empty($f['agent_ssh_events'])&&$f['agent_ssh_events']!=='0')?1:0;   // hybrid: agent metrics + SSH journal events
+        // The operator can freely pick ANY source (ssh / alloy / agent). The agent_uid is kept even when
+        // switched away from Agent → the running container just goes DORMANT (ingest ignores it) and flips
+        // back on instantly if they re-select Agent. No duplicate card is ever created.
+        $st=$conn->prepare("UPDATE nm_lx_hosts SET name=?,node_id=?,host_ip=?,source=?,alloy_url=?,agent_ssh_events=? WHERE id=?");
+        $st->bind_param('sisssii',$name,$nid,$ip,$src,$au,$hev,$id); $st->execute(); return['ok'=>true]; }
     function nm_lx_host_delete($conn,int $id): array { nm_lx_ensure($conn);
         $conn->query("DELETE FROM nm_lx_events WHERE host_id=".(int)$id); $conn->query("DELETE FROM nm_lx_health WHERE host_id=".(int)$id);
         $conn->query("DELETE FROM nm_lx_watch WHERE host_id=".(int)$id); $conn->query("DELETE FROM nm_lx_hosts WHERE id=".(int)$id); return['ok'=>true]; }
@@ -435,10 +441,21 @@ if (!function_exists('nm_lx_ensure')) {
         return $ok?['ok'=>true,'killed'=>$n]:['ok'=>false,'error'=>'SSH failed']; }
 
     // ── Cron orchestration + prune ────────────────────────────────────────────
-    function nm_lx_poll_all($conn): array { nm_lx_ensure($conn); $r=$conn->query("SELECT * FROM nm_lx_hosts WHERE enabled=1 AND COALESCE(source,'ssh')<>'agent'"); $hs=[]; while($r && ($x=$r->fetch_assoc()))$hs[]=$x;   // agent hosts PUSH their own telemetry — never SSH them
+    function nm_lx_poll_all($conn): array { nm_lx_ensure($conn); $r=$conn->query("SELECT * FROM nm_lx_hosts WHERE enabled=1"); $hs=[]; while($r && ($x=$r->fetch_assoc()))$hs[]=$x;
         if (!function_exists('nm_maint_active_ids') && is_file(__DIR__.'/nm_maintenance.php')) require_once __DIR__.'/nm_maintenance.php';
         if (function_exists('nm_maint_active_ids')) { $mnt=nm_maint_active_ids($conn); if($mnt) $hs=array_values(array_filter($hs, fn($h)=>empty($h['node_id'])||!isset($mnt[(int)$h['node_id']]))); }  // skip nodes in maintenance
-        $ev=0;$he=0;$wc=0; foreach($hs as $h){ $a=nm_lx_poll_events($conn,$h); if(!empty($a['ok']))$ev++; $b=nm_lx_poll_health($conn,$h); if(!empty($b['ok']))$he++; $c=nm_lx_watch_check($conn,$h); if(!empty($c['ok']))$wc++; }
+        $ev=0;$he=0;$wc=0;
+        foreach($hs as $h){
+            $isAgent = (($h['source']??'')==='agent');
+            // Pure agent host → it PUSHES everything; never SSH it. HYBRID agent (agent_ssh_events=1) →
+            // metrics/health still come from the push, but we DO pull journal events over SSH.
+            if ($isAgent && empty($h['agent_ssh_events'])) continue;
+            $a=nm_lx_poll_events($conn,$h); if(!empty($a['ok']))$ev++;
+            if (!$isAgent){ // health + watchdog only for SSH/Alloy hosts (agent health arrives via push)
+                $b=nm_lx_poll_health($conn,$h); if(!empty($b['ok']))$he++;
+                $c=nm_lx_watch_check($conn,$h); if(!empty($c['ok']))$wc++;
+            }
+        }
         nm_lx_prune($conn); return['ok'=>true,'hosts'=>count($hs),'events_ok'=>$ev,'health_ok'=>$he,'watch_ok'=>$wc]; }
     function nm_lx_prune($conn,int $days=30): void { nm_lx_ensure($conn); $d=max(1,$days); $conn->query("DELETE FROM nm_lx_events WHERE created_at < (UTC_TIMESTAMP() - INTERVAL $d DAY)"); $conn->query("DELETE FROM nm_lx_actions WHERE created_at < (UTC_TIMESTAMP() - INTERVAL $d DAY)"); }
 }

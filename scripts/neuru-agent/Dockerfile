@@ -7,8 +7,6 @@ LABEL org.opencontainers.image.title="neuru-agent" \
       org.opencontainers.image.source="https://github.com/hmiranda14/neuru" \
       org.opencontainers.image.licenses="AGPL-3.0"
 
-# non-root; still reads host /proc,/sys via the read-only bind mounts
-RUN adduser -D -H -u 10001 neuru
 COPY agent.py /app/agent.py
 WORKDIR /app
 
@@ -18,5 +16,7 @@ ENV HOST_PROC=/host/proc \
     NEURU_INTERVAL=30 \
     PYTHONUNBUFFERED=1
 
-USER neuru
+# Runs as root — required to read the host mount table (/host/proc/1/mounts) and the
+# Docker socket (root:docker). Standard for host-metrics agents (node_exporter, cAdvisor,
+# datadog-agent). All host mounts are read-only; the agent only makes outbound requests.
 ENTRYPOINT ["python3", "/app/agent.py"]

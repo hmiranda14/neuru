@@ -132,6 +132,13 @@ if (!function_exists('nm_portainer_cfg')) {
                 'RestartPolicy' => ['Name' => $spec['restart'] ?? 'unless-stopped'],
             ],
         ];
+        // Privileged host-namespace flags (e.g. the neuru-agent reads host /proc + reports host net).
+        $pidMode = trim((string)($spec['pid_mode'] ?? ''));
+        $netMode = trim((string)($spec['network_mode'] ?? ''));
+        if ($pidMode !== '') $body['HostConfig']['PidMode']     = $pidMode;
+        if ($netMode !== '') $body['HostConfig']['NetworkMode'] = $netMode;
+        // With host networking, Docker rejects/ignores published ports → drop them cleanly.
+        if ($netMode === 'host') { $body['ExposedPorts'] = new stdClass(); $body['HostConfig']['PortBindings'] = new stdClass(); }
         $name = rawurlencode((string)($spec['name'] ?? ''));
         $r = nm_portainer_call($cfg, 'POST', "/api/endpoints/{$eid}/docker/containers/create?name={$name}", $body, 60);
         if (!$r['ok']) return $r;

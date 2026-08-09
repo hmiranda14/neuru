@@ -102,6 +102,51 @@ window.NMLoader=(function(){var L=document.getElementById('nm-loader'),V=documen
             </a>
         </div>
         <?php
+        // NEURU BRAIN — WireGuard tunnel-to-brain health bulb (green=connected · yellow=issue · red=disconnected).
+        // Shown only when WG is on/configured on THIS install AND the viewer has net_mon access (same RBAC as
+        // the WG page). Live: polls wg_connection.php?api=wg_status every 30s. Universal — hidden if WG unused.
+        if ((function_exists('_nm_can') ? _nm_can('net_mon') : true)) {
+            require_once __DIR__ . '/nm_wgconn.php';
+            if (function_exists('nm_wgconn_state')) {
+                $__wg = nm_wgconn_state($conn);
+                if ((($__wg['status'] ?? 'off') === 'on') || !empty($__wg['conf_present'])) {
+                    if ((($__wg['status'] ?? '') === 'on') && !empty($__wg['link_up'])) { $__wgState = 'up';   $__wgMsg = 'connected' . (!empty($__wg['ip']) ? ' — ' . $__wg['ip'] : ''); }
+                    elseif (($__wg['status'] ?? '') === 'on')                            { $__wgState = 'warn'; $__wgMsg = 'tunnel enrolled but wg0 is not up'; }
+                    else                                                                 { $__wgState = 'down'; $__wgMsg = 'disconnected'; }
+                    if (!empty($__wg['last_err']) && $__wgState !== 'up') { $__wgState = 'warn'; $__wgMsg = (string)$__wg['last_err']; }
+        ?>
+        <style>
+        .nm-wgbrain{display:inline-flex;align-items:center;gap:7px;text-decoration:none;padding:4px 11px;border-radius:999px;border:1px solid rgba(255,255,255,.10);background:rgba(255,255,255,.03);margin-left:14px;transition:background .2s,border-color .2s;line-height:1;}
+        .nm-wgbrain:hover{background:rgba(255,255,255,.08);border-color:rgba(255,255,255,.20);}
+        .nm-wglabel{font-size:10px;font-weight:800;letter-spacing:1.3px;color:#9fb2cb;white-space:nowrap;}
+        .nm-wgbulb{width:11px;height:11px;border-radius:50%;flex:0 0 auto;background:#6b7688;transition:background .35s,box-shadow .35s;}
+        .nm-wgbulb[data-state="up"]{background:#2ee66e;box-shadow:0 0 9px #2ee66e;animation:nmwgpulse 2.2s ease-in-out infinite;}
+        .nm-wgbulb[data-state="warn"]{background:#f0b429;box-shadow:0 0 9px #f0b429;animation:nmwgpulse 1s ease-in-out infinite;}
+        .nm-wgbulb[data-state="down"]{background:#ff4d4d;box-shadow:0 0 9px #ff4d4d;}
+        @keyframes nmwgpulse{0%,100%{opacity:1}50%{opacity:.4}}
+        @media (max-width:820px){.nm-wglabel{display:none;}}
+        </style>
+        <a id="nm-wgbrain" href="wg_connection.php" class="nm-wgbrain" title="NEURU BRAIN — WireGuard tunnel to the NEURU brain: <?= htmlspecialchars($__wgMsg, ENT_QUOTES) ?>">
+            <span class="nm-wgbulb" data-state="<?= $__wgState ?>"></span><span class="nm-wglabel">NEURU BRAIN</span>
+        </a>
+        <script>
+        (function(){var el=document.getElementById('nm-wgbrain');if(!el)return;var b=el.querySelector('.nm-wgbulb');
+        el.addEventListener('click',function(e){e.preventDefault();var w=780,h=700,x=Math.max(0,((screen.width||1200)-w)/2),y=Math.max(0,((screen.height||800)-h)/2);var p=window.open('wg_connection.php','nmwgbrain','width='+w+',height='+h+',left='+x+',top='+y+',menubar=no,toolbar=no,location=no,status=no,resizable=yes,scrollbars=yes');if(p)p.focus();});
+        function apply(st){var s='down',m='disconnected';
+          if(st){ if(st.status==='on'&&st.link_up){s='up';m='connected'+(st.ip?' — '+st.ip:'');}
+            else if(st.status==='on'){s='warn';m='tunnel enrolled but wg0 is not up';}
+            else{s='down';m='disconnected';}
+            if(st.last_err&&s!=='up'){s='warn';m=st.last_err;} }
+          b.setAttribute('data-state',s);el.title='NEURU BRAIN — WireGuard tunnel to the NEURU brain: '+m;}
+        function poll(){fetch('wg_connection.php?api=wg_status',{cache:'no-store'}).then(function(r){return r.json();}).then(function(r){if(r&&r.ok)apply(r.state);}).catch(function(){});}
+        poll();setInterval(poll,30000);})();
+        </script>
+        <?php
+                }
+            }
+        }
+        ?>
+        <?php
         // Smokeping is gated by permission AND the optional tool being enabled.
         $_nm_sp_on = false;
         if (_nm_can('smokeping')) { $_r = $conn->query("SELECT setting_val FROM nm_settings WHERE setting_key='smokeping_enabled' LIMIT 1"); $_nm_sp_on = $_r && ($_x=$_r->fetch_row()) && $_x[0]==='1'; }

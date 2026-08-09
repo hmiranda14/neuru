@@ -178,8 +178,12 @@ if ($api) {
     }
 
     if ($api === 'signals') {
-        $rows=[]; try { $r=$conn->query("SELECT s.id,s.channel,s.sig_type,s.node_id,s.name,s.severity,s.title,s.detail,s.status,s.session_id,s.seen_count,UNIX_TIMESTAMP(s.last_seen) ts
-            FROM nm_ap2_signals s WHERE s.status NOT IN('resolved','ignored') ORDER BY FIELD(s.severity,'critical','warning','info'), s.id DESC LIMIT 40");
+        // include the channel's act_mode so the queue can show WHY a signal sits as-is: aware = watch only
+        // (never investigated), propose = will ask you to approve, auto = auto-fix. Non-channel signals
+        // (manual scans / chat) have no row → act_mode NULL → treated as a normal actionable signal.
+        $rows=[]; try { $r=$conn->query("SELECT s.id,s.channel,s.sig_type,s.node_id,s.name,s.severity,s.title,s.detail,s.status,s.session_id,s.seen_count,UNIX_TIMESTAMP(s.last_seen) ts, c.act_mode
+            FROM nm_ap2_signals s LEFT JOIN nm_ap2_channels c ON c.channel_key=s.channel
+            WHERE s.status NOT IN('resolved','ignored') ORDER BY FIELD(s.severity,'critical','warning','info'), s.id DESC LIMIT 40");
             while($r&&$x=$r->fetch_assoc()) $rows[]=$x; } catch (\Throwable $e) {}
         echo json_encode(['ok'=>true,'signals'=>$rows]); exit;
     }
@@ -196,6 +200,46 @@ if ($api) {
         }
         echo json_encode(['ok'=>true]); exit;
     }
+    if ($api === 'sig_act') {   // MANUAL action on a queued signal — mirrors the source module's actions
+        // (immunize / apply-heal / investigate / dismiss), reusing the Commander's own executors so the
+        // operator can act by hand on ANY signal (esp. watch-only ones) and it leaves the queue.
+        $sid=(int)($post['signal_id']??0);
+        $act=preg_replace('/[^a-z_]/','',(string)($post['action']??''));
+        if ($sid<=0){ echo json_encode(['ok'=>false,'error'=>'bad signal']); exit; }
+        $sg=null; try{ $q=$conn->query("SELECT id,channel,container_id,node_id,name,title FROM nm_ap2_signals WHERE id=$sid LIMIT 1"); $sg=$q?$q->fetch_assoc():null; }catch(\Throwable $e){}
+        if(!$sg){ echo json_encode(['ok'=>false,'error'=>'signal no longer in queue']); exit; }
+        $cid=(string)($sg['container_id']??'');
+        // INVESTIGATE — hand it to the engine; it stays in the queue and progresses (new→investigating→…)
+        if ($act==='investigate') {
+            $r = function_exists('nm_ap2_dispatch') ? nm_ap2_dispatch($conn,$sid,'manual') : ['ok'=>false];
+            if (function_exists('nm_audit')) { try{ nm_audit($conn,'ap2_sig_act',['signal'=>$sid,'action'=>'investigate','by'=>$uname]); }catch(\Throwable $e){} }
+            echo json_encode(['ok'=>!empty($r['ok']),'message'=>!empty($r['ok'])?'NEURU is investigating now…':'Could not start (node busy?)','removed'=>false]); exit;
+        }
+        // DISMISS — remove from queue + settle the underlying object (same as the dismiss endpoint)
+        if ($act==='dismiss') {
+            if (strpos($cid,'threat:')===0){ $tid=(int)substr($cid,7); if($tid){ try{ $conn->query("UPDATE nm_threats SET status='dismissed' WHERE id=$tid AND status='pending'"); }catch(\Throwable $e){} } }
+            elseif (strpos($cid,'heal:')===0){ $hid=(int)substr($cid,5); if($hid){ try{ $conn->query("UPDATE nm_heal_events SET status='dismissed' WHERE id=$hid AND status='proposed'"); }catch(\Throwable $e){} } }
+            try{ $conn->query("DELETE FROM nm_ap2_signals WHERE id=$sid"); }catch(\Throwable $e){}
+            if (function_exists('nm_audit')) { try{ nm_audit($conn,'ap2_sig_act',['signal'=>$sid,'action'=>'dismiss','by'=>$uname]); }catch(\Throwable $e){} }
+            echo json_encode(['ok'=>true,'message'=>'Removed from the queue.','removed'=>true]); exit;
+        }
+        // RUN an engine action (immunize / heal_apply) — reuse the Commander executors; on success the
+        // underlying object is handled (vaccinated / healed) so we drop the signal from the queue.
+        $res=['ok'=>false,'output'=>'unsupported action for this signal'];
+        if ($act==='immunize') {
+            $args=[];
+            if (strpos($cid,'threat:')===0) $args=['threat_id'=>(int)substr($cid,7)];
+            elseif (strpos($cid,'divert:')===0) { $did=(int)substr($cid,7); $ip=''; try{ $q=$conn->query("SELECT src_ip FROM nm_decoy_diversions WHERE id=$did LIMIT 1"); $ip=$q?(string)($q->fetch_assoc()['src_ip']??''):''; }catch(\Throwable $e){} $args=['indicator'=>$ip?:(string)$sg['name']]; }
+            else $args=['indicator'=>(string)$sg['name']];
+            if (function_exists('nm_ap2_do_immunize')) $res=nm_ap2_do_immunize($conn,$args);
+        } elseif ($act==='heal_apply') {
+            if (strpos($cid,'heal:')===0 && function_exists('nm_ap2_do_heal')) $res=nm_ap2_do_heal($conn,['event_id'=>(int)substr($cid,5)]);
+        }
+        $ok=!empty($res['ok']);
+        if ($ok) { try{ $conn->query("DELETE FROM nm_ap2_signals WHERE id=$sid"); }catch(\Throwable $e){} }
+        if (function_exists('nm_audit')) { try{ nm_audit($conn,'ap2_sig_act',['signal'=>$sid,'action'=>$act,'ok'=>$ok,'by'=>$uname]); }catch(\Throwable $e){} }
+        echo json_encode(['ok'=>$ok,'message'=>substr((string)($res['output']??($ok?'Done':'Failed')),0,300),'removed'=>$ok]); exit;
+    }
     if ($api === 'tg_drain') {   // opportunistic: while the cockpit is open, drain Telegram taps in ~seconds
         require_once __DIR__ . '/nm_aiopilot.php';   // poll_feed lives there (drains v1 + v2 via aip:/ap2:)
         $r = function_exists('nm_aip_tg_poll_feed') ? nm_aip_tg_poll_feed($conn) : ['ok'=>false,'skipped'=>'unavailable'];
@@ -210,9 +254,29 @@ if ($api) {
     }
 
     if ($api === 'sessions') {
-        $rows=[]; try { $r=$conn->query("SELECT s.id,s.node_id,s.status,s.autonomy,s.confidence,s.summary,UNIX_TIMESTAMP(s.updated_at) ts, n.display_name node_name
-            FROM nm_ap2_sessions s LEFT JOIN nm_nodes n ON n.id=s.node_id ORDER BY s.id DESC LIMIT 20");
+        // include the linked signal's name/title/channel so the History row always has a meaningful label
+        // even when the session isn't tied to a node (fleet/domain signals: threats, deception, heal…).
+        $rows=[]; try { $r=$conn->query("SELECT s.id,s.node_id,s.status,s.autonomy,s.confidence,s.summary,s.trigger_kind,UNIX_TIMESTAMP(s.updated_at) ts,
+                n.display_name node_name, sg.name sig_name, sg.title sig_title, sg.channel sig_channel, sg.severity sig_sev
+            FROM nm_ap2_sessions s LEFT JOIN nm_nodes n ON n.id=s.node_id LEFT JOIN nm_ap2_signals sg ON sg.id=s.signal_id
+            ORDER BY s.id DESC LIMIT 20");
             while($r&&$x=$r->fetch_assoc()) $rows[]=$x; } catch (\Throwable $e) {}
+        // enrich rows with NO node/signal label from their primary action's target (resolve immunize
+        // threat_id → IP, block ip, etc.) so History never shows a wall of identical "Fleet investigation".
+        foreach ($rows as &$row) {
+            if (!empty($row['node_name']) || !empty($row['sig_name']) || !empty($row['sig_title'])) continue;
+            try {
+                $q=$conn->query("SELECT tool,args FROM nm_ap2_actions WHERE session_id=".(int)$row['id']." ORDER BY id DESC LIMIT 1");
+                if ($q && $a=$q->fetch_assoc()) {
+                    $args=json_decode($a['args']?:'{}',true) ?: []; $tgt='';
+                    if (!empty($args['ip'])) $tgt=(string)$args['ip'];
+                    elseif (!empty($args['indicator'])) $tgt=(string)$args['indicator'];
+                    elseif (!empty($args['threat_id'])) { $tq=$conn->query("SELECT indicator FROM nm_threats WHERE id=".(int)$args['threat_id']." LIMIT 1"); if($tq && $t=$tq->fetch_row()) $tgt=(string)$t[0]; }
+                    $row['action_label']=trim(ucfirst(str_replace('_',' ',(string)$a['tool'])).($tgt!==''?' · '.$tgt:''));
+                }
+            } catch (\Throwable $e) {}
+        }
+        unset($row);
         echo json_encode(['ok'=>true,'sessions'=>$rows]); exit;
     }
 
@@ -237,7 +301,9 @@ if ($api) {
         $aid=(int)($post['action_id']??0);
         if ($aid<=0){ echo json_encode(['ok'=>false,'error'=>'bad action']); exit; }
         if ($api==='deny') {
+            $sigid=0; try{ $q=$conn->query("SELECT signal_id FROM nm_ap2_actions WHERE id=$aid"); $sigid=$q?(int)($q->fetch_row()[0]??0):0; }catch(\Throwable $e){}
             try { $conn->query("UPDATE nm_ap2_actions SET status='denied' WHERE id=$aid AND status='proposed'"); } catch (\Throwable $e) {}
+            if ($sigid && function_exists('nm_ap2_settle_signal')) nm_ap2_settle_signal($conn,$sigid);
             if (function_exists('nm_audit')) { try { nm_audit($conn,'ap2_deny',['action'=>$aid,'by'=>$uname]); } catch (\Throwable $e) {} }
             echo json_encode(['ok'=>true,'status'=>'denied']); exit;
         }
@@ -839,13 +905,24 @@ body.tt-rewound #v2-state{ border-color:rgba(230,180,90,.4); box-shadow:0 0 24px
 .sess-count{ font-size:10px; color:var(--mut); min-width:16px; text-align:center; background:rgba(120,150,255,.1); border-radius:8px; padding:1px 5px }
 .sess-events{ padding:2px 10px 8px; max-height:300px; overflow:auto }
 .sess-events .ev{ border-bottom:1px solid rgba(120,150,255,.05) }
-.hist-item{ border:1px solid rgba(120,150,255,.1); border-radius:10px; margin-bottom:7px; overflow:hidden }
-.hist-head{ display:flex; align-items:center; gap:8px; padding:8px 10px; cursor:pointer; font-size:12px }
-.hist-head:hover{ background:rgba(120,150,255,.06) }
+.hist-item{ background:#0d1830; border:1px solid rgba(120,150,255,.14); border-radius:9px; margin-bottom:6px; overflow:hidden }
+.hist-head{ display:flex; align-items:center; gap:8px; padding:7px 10px; cursor:pointer; font-size:12px }
+.hist-head:hover{ background:rgba(120,150,255,.09) }
 .hist-head b{ color:#eaf2ff }
-.hist-time{ margin-left:auto; color:var(--mut); font-size:10.5px }
-.hist-sum{ padding:0 10px 8px; font-size:11.5px; color:var(--mut); line-height:1.45 }
+.hist-name{ min-width:0; flex:0 1 auto; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:#eaf2ff }
+.hist-chip{ flex:0 0 auto; font-size:9.5px; text-transform:uppercase; letter-spacing:.4px; color:#9fb2cc; background:rgba(120,150,255,.12); border:1px solid rgba(120,150,255,.22); padding:1px 7px; border-radius:999px }
+.hist-time{ margin-left:auto; color:var(--mut); font-size:10.5px; flex:0 0 auto }
+.hist-sum{ padding:0 10px 7px; font-size:11px; color:#8fa0bd; line-height:1.4; display:-webkit-box; -webkit-line-clamp:1; -webkit-box-orient:vertical; overflow:hidden }
 .hist-events{ padding:4px 10px 8px; max-height:260px; overflow:auto; border-top:1px solid rgba(120,150,255,.08) }
+/* Manual-action popup */
+.sig-modal{ position:fixed; inset:0; z-index:40; background:rgba(4,8,16,.62); display:flex; align-items:center; justify-content:center; backdrop-filter:blur(3px); padding:16px }
+.sig-box{ width:min(440px,94vw); background:#0d1830; border:1px solid rgba(120,150,255,.28); border-radius:14px; box-shadow:0 24px 70px rgba(0,0,0,.55); overflow:hidden }
+.sig-hd{ display:flex; align-items:center; gap:10px; padding:13px 16px; border-bottom:1px solid rgba(120,150,255,.14) }
+.sig-hd b{ flex:1; color:#eaf2ff; font-size:14px; line-height:1.35 }
+.sig-detail{ padding:12px 16px; font-size:12.5px; line-height:1.5; max-height:200px; overflow:auto }
+.sig-acts{ display:flex; flex-direction:column; gap:8px; padding:6px 16px 14px }
+.sig-acts .btn{ justify-content:center; padding:10px }
+.sig-msg{ padding:0 16px 14px; font-size:12px; min-height:0; color:var(--green) }
 
 /* chat */
 #chat{ flex:1 1 40%; min-height:180px; }
@@ -872,6 +949,9 @@ body.tt-rewound #v2-state{ border-color:rgba(230,180,90,.4); box-shadow:0 0 24px
 .badge.new{ background:rgba(255,180,84,.16); color:var(--amber) } .badge.investigating{ background:rgba(56,225,255,.16); color:var(--cyan) }
 .badge.proposed{ background:rgba(155,107,255,.18); color:#c8b0ff } .badge.resolved{ background:rgba(67,224,138,.16); color:var(--green) }
 .badge.acted{ background:rgba(111,179,255,.16); color:#8fd0ff }
+.badge.watch{ background:rgba(139,151,184,.16); color:#aeb8cc; text-transform:none; letter-spacing:0 }
+.badge.mode-propose{ background:rgba(240,180,64,.14); color:#f0b840; text-transform:none; letter-spacing:0 }
+.badge.mode-auto{ background:rgba(67,224,138,.14); color:#43e08a; text-transform:none; letter-spacing:0 }
 .row.ch-passive{ opacity:.6 }
 .ch-tag{ font-size:8px; font-weight:700; padding:1px 6px; border-radius:10px; background:rgba(139,151,184,.2); color:var(--mut); text-transform:uppercase; letter-spacing:.05em; vertical-align:middle; margin-left:5px }
 .src-pill{ font-size:9.5px; font-weight:600; color:var(--cyan); background:rgba(56,225,255,.1); padding:1px 6px; border-radius:8px } .badge.stale{ background:rgba(139,151,184,.16); color:var(--mut) }
@@ -1096,6 +1176,17 @@ a.back:hover{ color:#fff }
 </div>
 
 </div><!-- /#v2-stage -->
+
+<!-- Manual-action popup for a queued signal (immunize / apply-heal / investigate / dismiss) -->
+<div id="sig-modal" class="sig-modal" style="display:none" onclick="if(event.target===this)closeSigMenu()">
+  <div class="sig-box">
+    <div class="sig-hd"><b id="sig-title">Signal</b><button class="btn ghost sm" onclick="closeSigMenu()"><i class="fa-solid fa-xmark"></i></button></div>
+    <div class="sig-detail" id="sig-detail"></div>
+    <div class="sig-acts" id="sig-acts"></div>
+    <div class="sig-msg" id="sig-msg"></div>
+  </div>
+</div>
+
 <script src="/three.min.js"></script>
 <script src="/three-orbitcontrols.js"></script>
 <script>
@@ -1452,14 +1543,62 @@ function setChannel(key,field,val){
 
 // where each signal comes FROM — shown on every queue row so the user knows the source at a glance
 const CHAN_SRC={nodes_down:'Node monitoring',nodes_findings:'AI insights',containers_inc:'Container incidents',containers_err:'Container logs',events_syslog:'Syslog',events_threats:'Collective Immunity',predictive:'Predictive Health',events_iface:'Interface flaps',heal:'Self-Healing',deception:'Deception Grid',incidents:'Correlated incidents',manual:'Manual · operator'};
+// ── Manual actions on a queued signal (click a signal → act by hand, mirrors its source module) ──
+let SIGS={};   // id → signal object (populated by loadSignals) so the action menu can read it
+function sigActionsFor(g){
+  const ch=g.channel, a=[];
+  if(ch==='events_threats') a.push({k:'immunize',t:'🛡 Immunize — block fleet-wide',c:'primary'});
+  else if(ch==='deception')  a.push({k:'immunize',t:'🛡 Immunize attacker — block fleet-wide',c:'primary'});
+  else if(ch==='heal')       a.push({k:'heal_apply',t:'🔧 Apply the proposed fix',c:'primary'});
+  if(g.node_id) a.push({k:'investigate',t:'🔎 Investigate now',c:''});
+  else if(!['events_threats','deception','heal'].includes(ch)) a.push({k:'investigate',t:'🔎 Investigate now',c:''});
+  a.push({k:'dismiss',t:'✕ Dismiss from queue',c:'ghost'});
+  return a;
+}
+function openSigMenu(id){ const g=SIGS[id]; if(!g)return;
+  $('#sig-title').textContent=g.title||g.name||g.sig_type||'Signal';
+  $('#sig-detail').innerHTML='<div style="color:#cdd6e2">'+esc(g.detail||g.title||'')+'</div>'+
+    '<div style="margin-top:8px;font-size:11px;color:var(--mut)">Source: '+esc(CHAN_SRC[g.channel]||g.channel)+(g.name?' · '+esc(g.name):'')+'</div>';
+  $('#sig-msg').textContent='';
+  $('#sig-acts').innerHTML=sigActionsFor(g).map(x=>'<button class="btn '+x.c+'" onclick="sigAct('+id+',\''+x.k+'\',this)">'+x.t+'</button>').join('');
+  $('#sig-modal').style.display='flex';
+}
+function closeSigMenu(){ const m=$('#sig-modal'); if(m)m.style.display='none'; }
+async function sigAct(id,action,btn){
+  const acts=$('#sig-acts'); if(acts) acts.querySelectorAll('button').forEach(b=>b.disabled=true);
+  const msg=$('#sig-msg'); msg.style.color='var(--mut)'; msg.textContent='Working…';
+  let r; try{ r=await post('sig_act',{signal_id:id,action:action}); }catch(e){ r={ok:false}; }
+  if(r&&r.ok){ msg.style.color='var(--green)'; msg.textContent=r.message||'Done ✓';
+    loadSignals(); loadState();
+    setTimeout(closeSigMenu, r.removed===false?1100:750);
+  } else { msg.style.color='var(--red)'; msg.textContent=(r&&(r.message||r.error))||'Failed';
+    if(acts) acts.querySelectorAll('button').forEach(b=>b.disabled=false); }
+}
+// Signal-queue badges: show WHY a signal sits as it does. A watch-only (aware) source never gets
+// investigated → show "watch only" instead of a misleading "new". An actionable source that's still
+// NEW shows what WILL happen (needs approval / auto-fix). Progressed states keep their real status.
+function sigBadges(g){
+  const stMap={acted:'reviewed',investigating:'investigating',proposed:'awaiting you','new':'new'};
+  if(g.act_mode==='aware' && g.status==='new')
+    return '<span class="badge watch" title="Watch-only source — NEURU shows it for awareness but does not investigate or act on it. Change it under Alert sources.">👁 watch only</span>';
+  const st=stMap[g.status]||g.status;
+  const stTitle=g.status==='acted'?'NEURU investigated this — it stays here until the condition clears':'';
+  let chip='';
+  if(g.status==='new'){
+    if(g.act_mode==='auto') chip='<span class="badge mode-auto" title="NEURU will investigate and auto-run SAFE fixes">auto-fix</span>';
+    else if(g.act_mode==='propose') chip='<span class="badge mode-propose" title="NEURU will investigate then ask you to Approve/Deny">needs approval</span>';
+  }
+  return `<span class="badge ${g.status}" title="${stTitle}">${st}</span>${chip}`;
+}
 async function loadSignals(){
   if(typeof TT!=='undefined' && !TT.live) return;   // frozen while the Timeline DVR is rewound
   const s=await j('?api=signals'); const box=$('#signals');
-  if(!s.signals||!s.signals.length){ box.innerHTML='<div class="muted">No open signals. NEURU is watching a calm fleet. ✨</div>'; return; }
+  if(!s.signals||!s.signals.length){ box.innerHTML='<div class="muted">No open signals. NEURU is watching a calm fleet. ✨</div>'; SIGS={}; return; }
+  SIGS={}; s.signals.forEach(g=>SIGS[g.id]=g);
   box.innerHTML=s.signals.map(g=>`<div class="row" data-sev="${esc(g.severity||'')}" data-status="${esc(g.status||'')}" data-node="${g.node_id||0}" data-nodename="${esc(g.name||'')}">
     <span class="dot ${g.severity}"></span>
-    <div class="t"><b>${esc(g.title||g.name||g.sig_type)}</b><span><span class="src-pill">${esc(CHAN_SRC[g.channel]||g.channel)}</span>${g.name?' · '+esc(g.name):''}${g.seen_count>1?' ·×'+g.seen_count:''}</span></div>
-    <span class="badge ${g.status}" title="${g.status==='acted'?'NEURU investigated this — it stays here until the condition clears':''}">${({acted:'reviewed',investigating:'investigating',proposed:'awaiting you','new':'new'})[g.status]||g.status}</span>
+    <div class="t" onclick="openSigMenu(${g.id})" style="cursor:pointer" title="Take manual action…"><b>${esc(g.title||g.name||g.sig_type)}</b><span><span class="src-pill">${esc(CHAN_SRC[g.channel]||g.channel)}</span>${g.name?' · '+esc(g.name):''}${g.seen_count>1?' ·×'+g.seen_count:''}</span></div>
+    ${sigBadges(g)}
     ${g.node_id?`<button class="btn ghost sm" onclick="focusNode(${g.node_id},this)" title="Focus this node — the core turns to it + rescan"><i class="fa-solid fa-magnifying-glass"></i></button>`:''}
     <button class="btn ghost sm" onclick="dismissSignal(${g.id},event)" title="Remove from queue (Scan now re-adds it if still real)"><i class="fa-solid fa-xmark"></i></button>
     </div>`).join('');
@@ -1784,12 +1923,19 @@ async function renderHistory(){
   const s=await j('?api=sessions'); const box=$('#pane-history');
   if(!s.sessions||!s.sessions.length){ box.innerHTML='<div class="muted">No past investigations yet. NEURU logs every session here.</div>'; return; }
   box.innerHTML='<div style="font-size:11px;color:var(--mut);padding:4px 2px 10px">Past investigations — click one to expand its full transcript.</div>'+
-    s.sessions.map(x=>`<div class="hist-item"><div class="hist-head" onclick="toggleHist(this.parentNode,${x.id})">
+    s.sessions.map(x=>{
+      // always show a meaningful label: node → signal name/title → trigger fallback (never a bare "—")
+      const label = x.node_name || x.sig_name || x.sig_title || x.action_label || (x.trigger_kind==='chat'?'Chat request':'Fleet investigation');
+      const chan  = histChan(x.sig_channel, x.trigger_kind) || (x.action_label?'auto-fix':'');
+      const chip  = chan?`<span class="hist-chip">${esc(chan)}</span>`:'';
+      return `<div class="hist-item"><div class="hist-head" onclick="toggleHist(this.parentNode,${x.id})">
       <span class="sess-status ss-${x.status==='done'?'done':(x.status==='awaiting_approval'?'wait':(x.status==='error'?'err':'active'))}">${esc(x.status)}</span>
-      <b>${esc(x.node_name||'—')}</b><span class="hist-time">${x.ts?nmAgo(x.ts):''}</span></div>
-      ${x.summary?`<div class="hist-sum">${esc(x.summary)}</div>`:''}
-      <div class="hist-events" style="display:none"></div></div>`).join('');
+      <b class="hist-name">${esc(label)}</b>${chip}<span class="hist-time">${x.ts?nmAgo(x.ts):''}</span></div>
+      ${(x.summary && !x.action_label)?`<div class="hist-sum">${esc(x.summary)}</div>`:''}
+      <div class="hist-events" style="display:none"></div></div>`;
+    }).join('');
 }
+function histChan(c,trig){ if(!c) return trig==='chat'?'chat':''; const m={events_threats:'threat',deception:'deception',heal:'self-heal',manual:'manual scan',node_monitoring:'node',correlated_incidents:'incident','ai_insights':'AI insight',events:'event'}; return m[c]||c.replace(/_/g,' '); }
 async function toggleHist(item,sid){
   const ev=item.querySelector('.hist-events');
   if(ev.style.display==='none'){ ev.style.display='block';

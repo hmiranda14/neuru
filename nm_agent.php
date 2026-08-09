@@ -42,6 +42,18 @@ if (!function_exists('nm_agent_ensure')) {
         } catch (\Throwable $e) { /* nm_lx_hosts is created by nm_linuxhost.php's nm_lx_ensure() */ }
     }
 
+    // Self-hosted NEURU almost always runs a self-signed cert on an IP:port (nm_https_setup.sh).
+    // An agent verifying TLS would reject it → we auto-set NEURU_VERIFY_TLS=0 for those endpoints.
+    function nm_agent_selfsigned_likely(string $scheme, string $host): bool {
+        if (strtolower($scheme) !== 'https') return false;   // http → no TLS to verify
+        $h = preg_replace('/:\d+$/', '', trim($host));       // strip :port
+        $h = trim($h, '[]');                                 // strip IPv6 brackets
+        if ($h === 'localhost' || substr($h, -6) === '.local') return true;
+        if (preg_match('/^(\d{1,3}\.){3}\d{1,3}$/', $h)) return true;   // IPv4 literal
+        if (strpos($h, ':') !== false) return true;                     // IPv6 literal
+        return false;   // a real domain → assume a valid cert, keep verification on
+    }
+
     // ── Shared enrolment token (stored in nm_settings; rotate = revoke all agents) ──
     function nm_agent_token($conn): string {
         try {
@@ -109,16 +121,49 @@ if (!function_exists('nm_agent_ensure')) {
             try { $conn->query("UPDATE nm_nodes SET monitor_type='agent' WHERE id=".(int)$nodeId." AND COALESCE(monitor_type,'')<>'agent'"); } catch (\Throwable $e) {}
         }
 
+        // ADOPTION (universal, prevents duplicate cards for ANY user/topology): attach this registration
+        // to an EXISTING Linux-Monitor card for the same box instead of creating a twin. Priority:
+        //   (1) a card the operator pre-designated as "NEURU Agent" (source='agent', not yet claimed);
+        //   (2) the SINGLE existing card for this node → upgrade it to Agent, and if it was SSH keep
+        //       pulling journal events (hybrid) so nothing is lost.
+        // Only when the box has NO card at all do we create a fresh one (below).
+        if (!$hid && $nodeId) {
+            try {
+                $st = $conn->prepare("SELECT id FROM nm_lx_hosts WHERE node_id=? AND source='agent' AND (agent_uid IS NULL OR agent_uid='') ORDER BY id LIMIT 1");
+                $st->bind_param('i', $nodeId); $st->execute();
+                if ($row = $st->get_result()->fetch_assoc()) {
+                    $hid = (int)$row['id'];
+                    $c2 = $conn->prepare("UPDATE nm_lx_hosts SET agent_uid=? WHERE id=?"); $c2->bind_param('si', $uid, $hid); $c2->execute(); $c2->close();
+                }
+                $st->close();
+            } catch (\Throwable $e) {}
+            if (!$hid) {   // (2) exactly one existing card for this node → adopt + hybrid-preserve events
+                try {
+                    $cr = $conn->query("SELECT COUNT(*) c FROM nm_lx_hosts WHERE node_id=".(int)$nodeId);
+                    if ($cr && (int)$cr->fetch_assoc()['c'] === 1) {
+                        $ex = $conn->query("SELECT id, source FROM nm_lx_hosts WHERE node_id=".(int)$nodeId." LIMIT 1")->fetch_assoc();
+                        $hid = (int)$ex['id'];
+                        $keepEvents = (($ex['source'] ?? '') === 'ssh') ? 1 : 0;   // SSH host → keep journal events as hybrid
+                        $c2 = $conn->prepare("UPDATE nm_lx_hosts SET source='agent', agent_uid=?, agent_ssh_events=GREATEST(agent_ssh_events, ?) WHERE id=?");
+                        $c2->bind_param('sii', $uid, $keepEvents, $hid); $c2->execute(); $c2->close();
+                    }
+                } catch (\Throwable $e) {}
+            }
+        }
+
         $now = gmdate('Y-m-d H:i:s');
         if ($hid) {
+            // RE-REGISTER of an EXISTING card: touch ONLY agent bookkeeping. NEVER overwrite name/source/
+            // node — those are the operator's to control (else an agent restart would undo a rename or a
+            // switch back to SSH/Grafana). The card's `source` is the single source of truth for how NEURU
+            // collects; a dormant agent (source≠'agent') simply gets ignored at ingest.
             try {
-                // only overwrite agent_version when the client actually sent one (don't clobber on a bare re-register)
                 if ($ver !== '') {
-                    $st = $conn->prepare("UPDATE nm_lx_hosts SET name=?, host_ip=?, node_id=?, source='agent', agent_version=?, agent_last_seen=?, enabled=1 WHERE id=?");
-                    $st->bind_param('ssissi', $name, $ip, $nodeId, $ver, $now, $hid);
+                    $st = $conn->prepare("UPDATE nm_lx_hosts SET agent_version=?, agent_last_seen=? WHERE id=?");
+                    $st->bind_param('ssi', $ver, $now, $hid);
                 } else {
-                    $st = $conn->prepare("UPDATE nm_lx_hosts SET name=?, host_ip=?, node_id=?, source='agent', agent_last_seen=?, enabled=1 WHERE id=?");
-                    $st->bind_param('ssisi', $name, $ip, $nodeId, $now, $hid);
+                    $st = $conn->prepare("UPDATE nm_lx_hosts SET agent_last_seen=? WHERE id=?");
+                    $st->bind_param('si', $now, $hid);
                 }
                 $st->execute(); $st->close();
             } catch (\Throwable $e) {}
@@ -148,15 +193,18 @@ if (!function_exists('nm_agent_ensure')) {
         return ['ok'=>true, 'host_id'=>$hid, 'node_id'=>$nodeId, 'name'=>$name];
     }
 
-    // ── Lean lookup by uid (ingest hot-path — no ALTER/ensure churn) → [host_id, node_id] or null ──
+    // ── Lean lookup by uid (ingest hot-path) → [host_id, node_id, source] or null ──
+    // Match by uid ALONE (not source) so a running agent always maps to ITS card and never spawns a
+    // duplicate — even when the operator has (temporarily) set the card to SSH/Grafana. The `source`
+    // it returns lets ingest decide whether to actually store (dormant when source≠'agent').
     function nm_agent_resolve($conn, string $uid): ?array {
         $uid = substr(preg_replace('/[^A-Za-z0-9._:-]/', '', $uid), 0, 64);
         if ($uid === '') return null;
         try {
-            $st = $conn->prepare("SELECT id, node_id FROM nm_lx_hosts WHERE agent_uid=? AND source='agent' LIMIT 1");
+            $st = $conn->prepare("SELECT id, node_id, source FROM nm_lx_hosts WHERE agent_uid=? LIMIT 1");
             $st->bind_param('s', $uid); $st->execute();
             $row = $st->get_result()->fetch_assoc(); $st->close();
-            if ($row) return ['host_id'=>(int)$row['id'], 'node_id'=>(int)$row['node_id']];
+            if ($row) return ['host_id'=>(int)$row['id'], 'node_id'=>(int)$row['node_id'], 'source'=>(string)$row['source']];
         } catch (\Throwable $e) {}
         return null;
     }
@@ -164,6 +212,14 @@ if (!function_exists('nm_agent_ensure')) {
     // ── Store a telemetry batch: health JSON (nm_lx_health) + heartbeat (nm_ping_stats) ──
     function nm_agent_ingest($conn, int $host_id, int $node_id, array $health, array $containers = []): array {
         if (function_exists('nm_lx_ensure')) nm_lx_ensure($conn);
+        // Respect the operator's choice: if this card is NOT set to 'agent' (they switched it to SSH/
+        // Grafana), the agent is DORMANT — accept the POST but store nothing, so the chosen source owns
+        // the card. Flipping it back to Agent resumes instantly (no re-deploy needed).
+        try {
+            $sr = $conn->query("SELECT source FROM nm_lx_hosts WHERE id=".(int)$host_id." LIMIT 1");
+            if ($sr && ($sx = $sr->fetch_assoc()) && ($sx['source'] ?? '') !== 'agent')
+                return ['ok'=>true, 'dormant'=>true, 'reason'=>'card source is '.($sx['source'] ?? '?')];
+        } catch (\Throwable $e) {}
         $now = gmdate('Y-m-d H:i:s');
         // Attach container stats (a section the SSH path doesn't have — the UI can grow into it).
         if ($containers) $health['containers'] = array_slice($containers, 0, 200);
@@ -264,9 +320,14 @@ if (!function_exists('nm_agent_ensure')) {
         nm_agent_ensure($conn);
         $out = [];
         try {
-            $r = $conn->query("SELECT id, name, host_ip, node_id, agent_uid, agent_version, agent_last_seen,
-                               TIMESTAMPDIFF(SECOND, agent_last_seen, UTC_TIMESTAMP()) age, status
-                               FROM nm_lx_hosts WHERE source='agent' ORDER BY agent_last_seen DESC");
+            // IP: prefer the host's own host_ip, else fall back to the linked node's IP (agent cards
+            // adopted from a pre-existing node often have an empty host_ip but the node carries the IP).
+            $r = $conn->query("SELECT h.id, h.name,
+                               COALESCE(NULLIF(h.host_ip,''), n.ip_address) host_ip, h.node_id,
+                               h.agent_uid, h.agent_version, h.agent_last_seen,
+                               TIMESTAMPDIFF(SECOND, h.agent_last_seen, UTC_TIMESTAMP()) age, h.status
+                               FROM nm_lx_hosts h LEFT JOIN nm_nodes n ON n.id=h.node_id
+                               WHERE h.source='agent' ORDER BY h.agent_last_seen DESC");
             while ($r && $x = $r->fetch_assoc()) $out[] = $x;
         } catch (\Throwable $e) {}
         return $out;

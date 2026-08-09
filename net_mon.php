@@ -660,7 +660,11 @@ foreach ($NM_NODES as $did => $nd) {
 }
 
 // ─── Summary Counts ───────────────────────────────────────────────────────────
-$summary = ['up' => 0, 'down' => 0, 'maintenance' => 0, 'unknown' => 0, 'ports_up' => 0, 'ports_down' => 0, 'alerts' => count($alerts)];
+// "Active Alerts" KPI = OPEN INCIDENTS (the deduped/correlated nm_incidents, exactly what incidents.php
+// shows as active) — NOT a sum of every raw signal (that inflated it into the hundreds and never matched
+// the incident list).
+$summary = ['up' => 0, 'down' => 0, 'maintenance' => 0, 'unknown' => 0, 'ports_up' => 0, 'ports_down' => 0,
+    'alerts' => (function($c){ try { $r=$c->query("SELECT COUNT(*) n FROM nm_incidents WHERE status IN ('open','acknowledged')"); return ($r && ($x=$r->fetch_assoc())) ? (int)$x['n'] : 0; } catch (\Throwable $e) { return 0; } })($conn)];
 foreach ($DEVICES as $id => $def) {
     $d = $device_map[$id] ?? null;
     if (!$d) { $summary['unknown']++; continue; }
@@ -749,7 +753,8 @@ if (($_GET['api'] ?? '') === 'live') {
         'ok' => true, 'ts' => time(),
         'summary'  => ['up'=>$summary['up'], 'down'=>$summary['down'], 'maintenance'=>$summary['maintenance'], 'unknown'=>$summary['unknown'],
                        'ports_up'=>$summary['ports_up'], 'ports_down'=>$summary['ports_down'],
-                       'cont_up'=>$summary['cont_up'], 'cont_down'=>$summary['cont_down'], 'cont_on'=>$summary['cont_on']],
+                       'cont_up'=>$summary['cont_up'], 'cont_down'=>$summary['cont_down'], 'cont_on'=>$summary['cont_on'],
+                       'alerts'=>$summary['alerts']],
         'devices'  => $live_devices,
         'top'      => array_slice($tt, 0, 9),
     ]);
@@ -1101,7 +1106,7 @@ if (empty($videoFile)) $videoFile = !empty($_SESSION['user_bgsite_video']) ? $_S
                 <div class="stat-val" id="stat-up"><?= $summary['up'] ?></div>
                 <div class="stat-lbl">Devices Up</div>
             </a>
-            <a class="stat-card <?= $summary['down'] > 0 ? 'stat-down' : 'stat-up' ?>" href="incidents.php" style="text-decoration:none;color:inherit;display:block;" title="View incidents for down devices">
+            <a class="stat-card <?= $summary['down'] > 0 ? 'stat-down' : 'stat-up' ?>" href="#nm-device-list" style="text-decoration:none;color:inherit;display:block;" title="Jump to the device list to see which are down">
                 <div class="stat-val" id="stat-down"><?= $summary['down'] ?></div>
                 <div class="stat-lbl">Devices Down</div>
             </a>
@@ -1341,15 +1346,14 @@ if (empty($videoFile)) $videoFile = !empty($_SESSION['user_bgsite_video']) ? $_S
                 return 'warning'; };
             const ago = sec => { sec=+sec||0; if(sec<60)return sec+'s ago'; const m=(sec/60)|0; if(m<60)return m+'m ago';
                                  const h=(m/60)|0; if(h<24)return h+'h ago'; return ((h/24)|0)+'d ago'; };
+            // The "Active Alerts" KPI stat is the OPEN-INCIDENTS count (server-rendered, authoritative) and
+            // is NOT touched here. This feed panel is a broader "recent signals" list (AI insights, container
+            // errors, config drift, netflow) — its badge counts the FEED items, independent of the KPI.
             let extra = 0;
             function bump(n){
                 extra += n;
-                const sv = document.getElementById('stat-alerts-val');
-                const base = sv ? (+sv.dataset.base||0) : 0, total = base + extra;
                 const b = document.getElementById('alerts-badge');
-                if (b){ b.textContent = total; b.style.display = total>0 ? '' : 'none'; }
-                if (sv){ sv.textContent = total; const card=document.getElementById('stat-alerts');
-                    if (card){ card.classList.toggle('stat-warn', total>0); card.classList.toggle('stat-up', total===0); } }
+                if (b){ b.textContent = extra; b.style.display = extra>0 ? '' : 'none'; }
             }
             function inject(html){
                 const empty = document.getElementById('alerts-empty'); if (empty) empty.remove();
@@ -2584,6 +2588,8 @@ function applyAutoRefresh() {
     tween(document.getElementById('stat-ports-up'), s.ports_up);
     tween(document.getElementById('stat-ports-down'), s.ports_down);
     if(s.cont_on){ tween(document.getElementById('stat-cont-up'), s.cont_up); tween(document.getElementById('stat-cont-down'), s.cont_down); }
+    if(s.alerts!=null){ const av=document.getElementById('stat-alerts-val'); if(av){ av.dataset.base=s.alerts; tween(av, s.alerts); }
+      const ac=document.getElementById('stat-alerts'); if(ac){ ac.classList.toggle('stat-warn', s.alerts>0); ac.classList.toggle('stat-up', s.alerts===0); } }   // KPI = open incidents, kept live (amber when >0)
 
     // ── per-device cards ──
     const devs = d.devices||{};

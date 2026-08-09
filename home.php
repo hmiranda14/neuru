@@ -36,8 +36,12 @@ if ($api === 'vitals') {
         $incOpen=(int)($q("SELECT COUNT(*) c FROM nm_incidents WHERE status IN('open','acknowledged')")['c'] ?? 0);
         $incCrit=(int)($q("SELECT COUNT(*) c FROM nm_incidents WHERE status IN('open','acknowledged') AND severity='critical'")['c'] ?? 0);
     }
-    $botActive=0; $botLast=null;
-    if ($has('nm_aip_sessions')) {
+    $botActive=0; $botLast=null; $botEnabled=false;
+    if ($has('nm_ap2_sessions')) {   // NEURU Commander (v2) — the live autonomous brain
+        $botActive=(int)($q("SELECT COUNT(*) c FROM nm_ap2_sessions WHERE status IN('active','awaiting_approval')")['c'] ?? 0);
+        if ($has('nm_ap2_events')) $botLast=$q("SELECT TIMESTAMPDIFF(MINUTE,MAX(created_at),NOW()) a FROM nm_ap2_events")['a'] ?? null;
+        $botEnabled = (($q("SELECT setting_val v FROM nm_settings WHERE setting_key='ap2_enabled'")['v'] ?? '0') === '1');
+    } elseif ($has('nm_aip_sessions')) {   // fallback: legacy NetAIObot (v1) if v2 isn't present
         $botActive=(int)($q("SELECT COUNT(*) c FROM nm_aip_sessions WHERE status IN('active','awaiting_approval')")['c'] ?? 0);
         $botLast=$q("SELECT TIMESTAMPDIFF(MINUTE,MAX(created_at),NOW()) a FROM nm_aip_events")['a'] ?? null;
     }
@@ -49,7 +53,7 @@ if ($api === 'vitals') {
         $s=0;$n=0; while($x=$r->fetch_assoc()){ $s+=(float)$x['u']; $n++; } if($n) $slaAvg=round($s/$n,2);
     }
     echo json_encode(['ok'=>true,'nodes'=>['total'=>$total,'up'=>$up,'down'=>$down,'degraded'=>$degraded],
-        'incidents'=>['open'=>$incOpen,'critical'=>$incCrit],'bot'=>['active'=>$botActive,'last_min'=>$botLast],
+        'incidents'=>['open'=>$incOpen,'critical'=>$incCrit],'bot'=>['active'=>$botActive,'last_min'=>$botLast,'enabled'=>$botEnabled],
         'db_ok'=>$dbok,'sla_avg'=>$slaAvg]);
     exit;
 }
@@ -258,7 +262,7 @@ html{ background:#05080f; } body{ margin:0; font-family:'Segoe UI',Tahoma,sans-s
     <div class="v" style="--c:var(--ok)" data-go="<?= $vgo('net_mon','net_mon.php') ?>"><div class="n" id="v-up">—</div><div class="l">Nodes up</div><div class="s" id="v-updn" style="color:#8a93a3;"></div></div>
     <div class="v" style="--c:var(--crit)" data-go="<?= $vgo('incidents','incidents.php') ?>"><div class="n" id="v-inc">—</div><div class="l">Open incidents</div><div class="s" id="v-inccrit" style="color:#8a93a3;"></div></div>
     <div class="v" style="--c:var(--accent)" data-go="<?= $vgo('sla_live','sla.php') ?>"><div class="n" id="v-sla">—</div><div class="l">Avg uptime 24h</div></div>
-    <div class="v" style="--c:#9b59b6" data-go="<?= $vgo('aiopilot','aiopilot.php') ?>"><div class="n" id="v-bot">—</div><div class="l">NetAIObot</div><div class="s" id="v-botlast" style="color:#8a93a3;"></div></div>
+    <div class="v" style="--c:#9b59b6" data-go="<?= $vgo('autopilotv2','autopilotv2.php') ?>"><div class="n" id="v-bot">—</div><div class="l">NEURU Commander</div><div class="s" id="v-botlast" style="color:#8a93a3;"></div></div>
     <div class="v" style="--c:#e67e22" data-go="<?= $vgo('dbmon','dbmon.php') ?>"><div class="n" id="v-db">—</div><div class="l">Databases OK</div></div>
     <div class="v" style="--c:#36e3d0" data-act="grid"><div class="n"><?= $appCount ?></div><div class="l">Modules available</div></div>
   </div>
@@ -426,8 +430,9 @@ async function vitals(){
   const inc=document.getElementById('v-inc'); animN(inc,r.incidents.open); inc.style.color=r.incidents.open?'var(--crit)':'var(--ok)';
   document.getElementById('v-inccrit').textContent=r.incidents.critical?(r.incidents.critical+' critical'):'clear';
   document.getElementById('v-sla').textContent=(r.sla_avg!=null?r.sla_avg+'%':'—');
-  const bot=document.getElementById('v-bot'); bot.textContent=r.bot.active?(r.bot.active+' active'):'idle';
-  document.getElementById('v-botlast').textContent=(r.bot.last_min!=null?('last '+r.bot.last_min+'m ago'):'');
+  const bot=document.getElementById('v-bot'); bot.textContent=r.bot.active?(r.bot.active+' active'):(r.bot.enabled?'watching':'idle');
+  bot.style.color=r.bot.active?'var(--warn)':(r.bot.enabled?'#43e08a':'#8a93a3');
+  document.getElementById('v-botlast').textContent=(r.bot.last_min!=null?('last '+r.bot.last_min+'m ago'):(r.bot.enabled?'auto-scan on':''));
   const db=document.getElementById('v-db'); if(r.db_ok!=null) animN(db,r.db_ok); else db.textContent='—';
   firstV=false;
 }

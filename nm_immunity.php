@@ -21,6 +21,24 @@ require_once __DIR__ . '/nm_audit.php';
 
 if (!function_exists('nm_imm_vaccinate')) {
 
+    // Shipped STARTER DNS threat patterns (regex vs queried domains, case-insensitive). Seeded on
+    // ensure so EVERY install detects malware/abuse domains out-of-the-box from its Pi-hole/AdGuard
+    // query logs — previously empty on fresh installs, so Collective Immunity silently found nothing.
+    if (!defined('NM_IMM_DEFAULT_DNS_PATTERNS')) define('NM_IMM_DEFAULT_DNS_PATTERNS',
+"# ── NEURU starter DNS threat patterns (regex, vs queried domains, case-insensitive) ──\n".
+"# Heavily-abused free TLDs (malware / phishing / spam)\n".
+"\\.(tk|ml|ga|cf|gq)$\n".
+"# Other commonly-abused cheap TLDs\n".
+"\\.(top|gdn|work|click|link|loan|men|date|racing|win|bid|stream|download|review|country|kim|science|party|trade|webcam|cricket|accountant|faith|mov|zip)$\n".
+"# Crypto-mining / drive-by miners\n".
+"(^|\\.)(coin-?hive|cryptonight|minexmr|webmine|jsecoin|coinimp|crypto-?loot|deepminer|miner[0-9])\n".
+"# Malware / C2 / threat keywords embedded in the domain\n".
+"(^|\\.|-)(malware|botnet|ransom(ware)?|trojan|keylogger|phish(ing)?|exploit|payload|cobaltstrike)\n".
+"# DGA-like: very long random alphanumeric subdomain\n".
+"^[a-z0-9]{25,}\\.\n".
+"# DNS-tunneling: very long hex subdomain\n".
+"^[0-9a-f]{32,}\\.\n");
+
     function nm_imm_ensure($conn): void {
         if (!($conn instanceof mysqli)) return;
         static $done=false; if($done) return; $done=true;
@@ -61,6 +79,21 @@ if (!function_exists('nm_imm_vaccinate')) {
         // (mysqli is in exception mode, so '@' won't swallow a duplicate-column error → guard.)
         $c=$conn->query("SHOW COLUMNS FROM nm_threats LIKE 'reported_by'");
         if ($c && $c->num_rows===0) $conn->query("ALTER TABLE nm_threats ADD COLUMN reported_by VARCHAR(200) DEFAULT NULL");
+        // Seed DNS detection ON + the starter patterns when the setting is absent OR empty (so it shows
+        // in the UI on EVERY install — not just fresh ones — since the DB/settings never travel with an
+        // update). Never clobbers a setting that already holds a real (non-empty) operator value.
+        try {
+            $seed = function($k,$v) use($conn){
+                $q=$conn->query("SELECT setting_val FROM nm_settings WHERE setting_key='".$conn->real_escape_string($k)."' LIMIT 1");
+                $cur = ($q && ($x=$q->fetch_row())) ? trim((string)$x[0]) : null;
+                if ($cur !== null && $cur !== '') return;   // real value already present → keep it
+                $st=$conn->prepare("INSERT INTO nm_settings(setting_key,setting_val) VALUES(?,?)
+                                    ON DUPLICATE KEY UPDATE setting_val=VALUES(setting_val)");
+                $st->bind_param('ss',$k,$v); $st->execute(); $st->close();
+            };
+            $seed('imm_detect_dns','1');
+            $seed('imm_dns_patterns', NM_IMM_DEFAULT_DNS_PATTERNS);
+        } catch (\Throwable $e) {}
     }
 
     function nm_imm_setting($conn,$k,$d){ $r=$conn->query("SELECT setting_val FROM nm_settings WHERE setting_key='".$conn->real_escape_string($k)."' LIMIT 1"); return $r&&($x=$r->fetch_row())?$x[0]:$d; }
@@ -292,23 +325,37 @@ if (!function_exists('nm_imm_vaccinate')) {
     // Matches queried domains against the admin's threat regex list (one per line).
     // Known-good domains (nm_imm_is_safe_domain) are skipped so a broad pattern can't
     // pull in a legit CDN/vendor. Returns [domain => the pattern that matched].
+    // Scan the query logs of EVERY enabled Pi-hole AND AdGuard Home for domains matching the threat
+    // patterns. (Was Pi-hole-only before → AdGuard-only installs detected nothing.) Domains are deduped
+    // across all servers so the safe-domain check + regex run once per unique domain.
     function nm_imm_detect_dns($conn): array {
         $raw = trim((string)nm_imm_setting($conn,'imm_dns_patterns',''));
+        if ($raw==='') $raw = defined('NM_IMM_DEFAULT_DNS_PATTERNS') ? NM_IMM_DEFAULT_DNS_PATTERNS : '';
         if ($raw==='') return [];
-        $pats=[]; foreach(preg_split('/\r?\n/',$raw) as $p){ $p=trim($p); if($p!=='' && $p[0]!=='#') $pats[]=$p; }
-        if (!$pats) return [];
-        $id = nm_ph_default_id($conn); if(!$id) return [];
-        $q = nm_ph_call($conn,$id,'queries',['length'=>2000]);
-        if (empty($q['ok'])) return [];
-        $rows = $q['data']['queries'] ?? [];
+        $rx=[]; foreach(preg_split('/\r?\n/',$raw) as $p){ $p=trim($p); if($p===''||$p[0]==='#') continue;
+            $r='~'.str_replace('~','\~',$p).'~i'; if(@preg_match($r,'')!==false) $rx[$r]=$p; }
+        if (!$rx) return [];
+
+        $domains=[];   // unique lowercased queried domains across all DNS servers
+        // ── Pi-hole(s) — recent queries ──
+        if (function_exists('nm_ph_servers')) foreach (nm_ph_servers($conn,true) as $S) {
+            try { $q=nm_ph_call($conn,(int)$S['id'],'queries',['length'=>2000]);
+                  if (!empty($q['ok'])) foreach (($q['data']['queries'] ?? []) as $qr) {
+                      $d=strtolower(trim((string)($qr['domain'] ?? ''))); if($d!=='') $domains[$d]=1; } }
+            catch (\Throwable $e) {}
+        }
+        // ── AdGuard Home(s) — recent query log (question.name, any reason) ──
+        if (function_exists('nm_ag_servers')) foreach (nm_ag_servers($conn,true) as $S) {
+            try { $q=nm_ag_call($conn,(int)$S['id'],'querylog',['limit'=>2000]);
+                  if (!empty($q['ok'])) foreach (($q['data']['data'] ?? []) as $qr) {
+                      $d=strtolower(trim((string)($qr['question']['name'] ?? ''))); if($d!=='') $domains[$d]=1; } }
+            catch (\Throwable $e) {}
+        }
+
         $hit=[];
-        foreach($rows as $qr){
-            $dom = strtolower((string)($qr['domain'] ?? '')); if($dom==='') continue;
+        foreach (array_keys($domains) as $dom) {
             if (nm_imm_is_safe_domain($conn,$dom)) continue;   // never flag a known-good domain
-            foreach($pats as $p){
-                $rx = '~'.str_replace('~','\~',$p).'~i';
-                if (@preg_match($rx,$dom)) { $hit[$dom]=$p; break; }   // remember WHICH pattern matched
-            }
+            foreach ($rx as $r=>$p) { if (@preg_match($r,$dom)) { $hit[$dom]=$p; break; } }
         }
         return $hit;   // [domain => matched pattern]
     }

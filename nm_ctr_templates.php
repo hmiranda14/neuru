@@ -24,6 +24,14 @@ function nm_ctr_ensure($conn): void {
         created_by   INT NULL, created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         UNIQUE KEY uq_name (name)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+    // Privileged host-namespace flags (only builtin templates that need them set these; the
+    // deploy path reads them SERVER-SIDE so a user can't set pid=host on an arbitrary image).
+    $have = [];
+    $rc = $conn->query("SELECT COLUMN_NAME FROM information_schema.COLUMNS
+                        WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='nm_ctr_templates' AND COLUMN_NAME IN ('pid_mode','network_mode')");
+    while ($rc && ($x=$rc->fetch_assoc())) $have[$x['COLUMN_NAME']]=1;
+    if (!isset($have['pid_mode']))     { try { $conn->query("ALTER TABLE nm_ctr_templates ADD COLUMN pid_mode VARCHAR(16) NULL"); } catch (\Throwable $e) {} }
+    if (!isset($have['network_mode'])) { try { $conn->query("ALTER TABLE nm_ctr_templates ADD COLUMN network_mode VARCHAR(32) NULL"); } catch (\Throwable $e) {} }
     @$conn->query("INSERT IGNORE INTO role_profiles (role_name,button_key,enabled) VALUES ('admin','containers',1)");
     nm_ctr_seed($conn);
 }
@@ -74,6 +82,20 @@ function nm_ctr_seed($conn): void {
         $st->execute();
     }
     $st->close();
+
+    // ── NEURU Agent — our own one-click remote collector ──────────────────────
+    // Needs host namespaces (pid_mode/network_mode = 'host') so it reads the target box's
+    // /proc,/sys and reports host network. Env (NEURU_URL/NEURU_TOKEN) is auto-filled live
+    // in nm_ctr_templates() so the operator just clicks Deploy. Ports omitted (host net).
+    $vols = json_encode(['/proc:/host/proc:ro','/sys:/host/sys:ro','/:/host/root:ro','/var/run/docker.sock:/var/run/docker.sock:ro']);
+    $env  = json_encode(['NEURU_URL=__AUTO__','NEURU_TOKEN=__AUTO__','NEURU_INTERVAL=30']);
+    if ($ag = $conn->prepare("INSERT IGNORE INTO nm_ctr_templates
+            (name,category,image,description,icon,ports_json,env_json,volumes_json,restart,is_builtin,pid_mode,network_mode)
+            VALUES ('NEURU Agent','Monitoring','ghcr.io/hmiranda14/neuru-agent:latest',
+                    'Featherweight remote collector — pushes CPU/mem/disk/net + Docker stats to NEURU',
+                    'fa-solid fa-satellite-dish','{}',?,?,'unless-stopped',1,'host','host')")) {
+        $ag->bind_param('ss', $env, $vols); $ag->execute(); $ag->close();
+    }
 }
 
 function nm_ctr_templates($conn): array {
@@ -85,9 +107,26 @@ function nm_ctr_templates($conn): array {
         $x['env']     = json_decode((string)$x['env_json'], true) ?: [];
         $x['volumes'] = json_decode((string)$x['volumes_json'], true) ?: [];
         unset($x['ports_json'],$x['env_json'],$x['volumes_json']);
+        // NEURU Agent: pre-fill the live endpoint + enrollment token so the operator just clicks Deploy.
+        if (($x['image'] ?? '') === 'ghcr.io/hmiranda14/neuru-agent:latest') {
+            $x['env'] = nm_ctr_agent_env($conn);
+            $x['autofill'] = true;
+        }
         $out[] = $x;
     }
     return $out;
+}
+// Live env for the NEURU Agent template (endpoint from this request + the enrollment token).
+function nm_ctr_agent_env($conn): array {
+    require_once __DIR__ . '/nm_agent.php';
+    $tok = nm_agent_token($conn); if ($tok === '') $tok = nm_agent_token_rotate($conn);
+    $scheme = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
+    $host   = $_SERVER['HTTP_HOST'] ?? 'YOUR-NEURU-HOST';
+    $env = ['NEURU_URL=' . $scheme . '://' . $host . '/nm_agent_api.php',
+            'NEURU_TOKEN=' . $tok,
+            'NEURU_INTERVAL=30'];
+    if (nm_agent_selfsigned_likely($scheme, $host)) $env[] = 'NEURU_VERIFY_TLS=0';   // self-signed NEURU
+    return $env;
 }
 function nm_ctr_template_save($conn, array $in, ?int $uid=null): array {
     nm_ctr_ensure($conn);
@@ -155,6 +194,25 @@ function nm_ctr_deploy($conn, array $cfg, int $eid, array $in, ?int $uid=null): 
     $restart = in_array(($in['restart']??'unless-stopped'),['no','always','unless-stopped','on-failure'],true)?$in['restart']:'unless-stopped';
 
     $spec = ['image'=>$image,'name'=>$name,'ports'=>$ports,'env'=>$env,'binds'=>$binds,'restart'=>$restart];
+
+    // Privileged host-namespace flags are NEVER taken from client input — only from the referenced
+    // BUILTIN template (prevents a user from setting pid=host on an arbitrary image). If the operator
+    // deploys the NEURU Agent, also guarantee its env carries the real endpoint + token.
+    $tplId = (int)($in['tpl'] ?? 0);
+    if ($tplId > 0) {
+        $tr = $conn->query("SELECT image,pid_mode,network_mode FROM nm_ctr_templates WHERE id=".$tplId." AND is_builtin=1");
+        if ($tr && ($trow = $tr->fetch_assoc())) {
+            if (!empty($trow['pid_mode']))     $spec['pid_mode']     = (string)$trow['pid_mode'];
+            if (!empty($trow['network_mode'])) $spec['network_mode'] = (string)$trow['network_mode'];
+            if (($trow['image'] ?? '') === 'ghcr.io/hmiranda14/neuru-agent:latest') {
+                // ensure NEURU_URL/NEURU_TOKEN are present + correct even if the form was cleared
+                $keys = [];
+                foreach ($spec['env'] as $e) { $k = strtok($e,'='); if ($k!==false) $keys[$k]=1; }
+                $auto = nm_ctr_agent_env($conn);
+                foreach ($auto as $ae) { $ak = strtok($ae,'='); if (empty($keys[$ak])) $spec['env'][] = $ae; }
+            }
+        }
+    }
     $r = nm_portainer_container_create($cfg, $eid, $spec);
     nm_audit($conn, 'container.deploy', ['target_type'=>'docker','target_id'=>'endpoint:'.$eid,
         'details'=>['image'=>$image,'name'=>$name,'ok'=>$r['ok'],'status'=>$r['status']??0,'error'=>$r['error']??'']]);

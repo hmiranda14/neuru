@@ -185,6 +185,7 @@ if [ -f "$CRONF" ]; then
     ensure_cron cron_notify.php    "*/5 * * * *"
     ensure_cron cron_container_logs.php "*/5 * * * *"
     ensure_cron cron_autopilotv2.php "* * * * *"
+    ensure_cron cron_aip_telegram.php "* * * * *"
     ensure_cron cron_biosphere.php  "* * * * *"
     ensure_cron cron_cluster.php    "* * * * *"
     ensure_cron cron_netdoc.php     "*/10 * * * *"

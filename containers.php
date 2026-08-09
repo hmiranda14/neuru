@@ -1103,7 +1103,12 @@ function configForm(){
   document.getElementById('dpl-title').textContent=t?('Configure: '+t.name):'Configure container';
   const sug=t?t.name.toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,''):'';
   const hostOpts=(DPL.endpoints||[]).map(e=>`<option value="${e.id}" ${String(e.id)===String(DPL.host)?'selected':''}>${esc(e.name)}${e.up?'':' — down'}</option>`).join('')||`<option value="${ENDPOINT}">current host</option>`;
+  const isAgent=!!(t&&t.autofill);
+  const agentNote=isAgent?`<div style="margin:0 0 14px;padding:11px 14px;border:1px solid rgba(126,231,135,.35);background:rgba(126,231,135,.09);border-radius:10px;font-size:12.5px;color:#bfe9c6;">
+      <i class="fas fa-wand-magic-sparkles" style="color:#7ee787;"></i> <b>Pre-configured.</b> The endpoint URL and enrollment token below are already filled in from this NEURU. Just pick the host and click <b>Deploy</b> — the agent will self-register within ~30s and appear in the Linux Monitor. It reads the host's <code>/proc</code>,<code>/sys</code> and Docker socket (all read-only) and uses host networking, so no port mapping is needed.
+    </div>`:'';
   document.getElementById('dpl-body').innerHTML=`<div class="dplf">
+    ${agentNote}
     <div class="dpl-row" style="gap:12px;margin-bottom:12px;">
       <div style="flex:1;"><label><i class="fas fa-server" style="color:#4da3ff;"></i> Deploy to host</label><select id="dp-host" onchange="onHostChange()">${hostOpts}</select></div>
     </div>
@@ -1114,8 +1119,8 @@ function configForm(){
         <div id="dp-imgdd" class="imgdd"></div></div>
       <div style="width:150px;"><label>Restart</label><select id="dp-restart">${['unless-stopped','always','on-failure','no'].map(x=>`<option ${((t&&t.restart===x)||(!t&&x==='unless-stopped'))?'selected':''}>${x}</option>`).join('')}</select></div>
     </div>
-    <label style="margin-top:8px;">Port mappings <span style="color:#667;">(host : container)</span></label><div id="dp-ports"></div><button class="addbtn" onclick="addPort()">+ port</button>
-    <label style="margin-top:12px;">Environment variables</label><div id="dp-env"></div><button class="addbtn" onclick="addEnv()">+ variable</button>
+    ${isAgent?'':`<label style="margin-top:8px;">Port mappings <span style="color:#667;">(host : container)</span></label><div id="dp-ports"></div><button class="addbtn" onclick="addPort()">+ port</button>`}
+    <label style="margin-top:12px;">Environment variables${isAgent?' <span style="color:#7ee787;">(auto-filled)</span>':''}</label><div id="dp-env"></div><button class="addbtn" onclick="addEnv()">+ variable</button>
     <label style="margin-top:12px;">Volumes <span style="color:#667;">(/host : /container)</span></label><div id="dp-vols"></div><button class="addbtn" onclick="addVol()">+ volume</button>
   </div>`;
   renderRows();
@@ -1125,7 +1130,8 @@ function configForm(){
 }
 function renderRows(){
   const none='<div style="color:#667;font-size:12px;margin-bottom:6px;">none</div>';
-  document.getElementById('dp-ports').innerHTML=DPL.ports.map((p,i)=>`<div class="dpl-row"><input value="${esc(p.host)}" oninput="DPL.ports[${i}].host=this.value" placeholder="8080"><span style="align-self:center;color:#667;">:</span><input value="${esc(p.container)}" oninput="DPL.ports[${i}].container=this.value" placeholder="80/tcp"><button class="rm" onclick="DPL.ports.splice(${i},1);renderRows()">×</button></div>`).join('')||none;
+  const pe=document.getElementById('dp-ports');
+  if(pe) pe.innerHTML=DPL.ports.map((p,i)=>`<div class="dpl-row"><input value="${esc(p.host)}" oninput="DPL.ports[${i}].host=this.value" placeholder="8080"><span style="align-self:center;color:#667;">:</span><input value="${esc(p.container)}" oninput="DPL.ports[${i}].container=this.value" placeholder="80/tcp"><button class="rm" onclick="DPL.ports.splice(${i},1);renderRows()">×</button></div>`).join('')||none;
   document.getElementById('dp-env').innerHTML=DPL.env.map((e,i)=>`<div class="dpl-row"><input value="${esc(e)}" oninput="DPL.env[${i}]=this.value" placeholder="KEY=value"><button class="rm" onclick="DPL.env.splice(${i},1);renderRows()">×</button></div>`).join('')||none;
   document.getElementById('dp-vols').innerHTML=DPL.vols.map((v,i)=>`<div class="dpl-row"><input value="${esc(v)}" oninput="DPL.vols[${i}]=this.value" placeholder="/srv/app:/data"><button class="rm" onclick="DPL.vols.splice(${i},1);renderRows()">×</button></div>`).join('')||none;
 }
@@ -1145,7 +1151,8 @@ function addPort(){ DPL.ports.push({host:'',container:''}); renderRows(); }
 function addEnv(){ DPL.env.push(''); renderRows(); }
 function addVol(){ DPL.vols.push(''); renderRows(); }
 function curSpec(){ return { endpoint:(+DPL.host)||ENDPOINT, name:document.getElementById('dp-name').value.trim(), image:document.getElementById('dp-image').value.trim(),
-  restart:document.getElementById('dp-restart').value, ports:DPL.ports.filter(p=>p.host&&p.container), env:DPL.env.filter(Boolean), volumes:DPL.vols.filter(Boolean) }; }
+  restart:document.getElementById('dp-restart').value, ports:DPL.ports.filter(p=>p.host&&p.container), env:DPL.env.filter(Boolean), volumes:DPL.vols.filter(Boolean),
+  tpl:(DPL.tpl?DPL.tpl.id:0) }; }
 async function doDeploy(){
   const s=curSpec(); if(!s.image){ alert('Image is required'); return; }
   deployStep(3); document.getElementById('dpl-title').textContent='Deploying…'; document.getElementById('dpl-foot').innerHTML='';

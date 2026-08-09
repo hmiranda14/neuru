@@ -9,6 +9,7 @@ include('connection.php');
 require_once('access_control.php');
 require_once('nm_chrome.php');
 require_once('nm_linuxhost.php');
+require_once('nm_agent.php');
 include('logger.php');
 
 $api = $_GET['api'] ?? '';
@@ -18,6 +19,8 @@ if (!checkAccess($conn, 'linux')) {
     header('Location: /denied_access.php?page=linux'); exit;
 }
 nm_lx_ensure($conn);
+$lx_agent_token = nm_agent_token($conn); if ($lx_agent_token==='') $lx_agent_token = nm_agent_token_rotate($conn);
+$lx_agent_base  = ((!empty($_SERVER['HTTPS'])&&$_SERVER['HTTPS']!=='off')?'https':'http').'://'.($_SERVER['HTTP_HOST']??'your-neuru-host');
 if (function_exists('session_write_close')) @session_write_close(); // free session lock before slow SSH/n8n I/O (prevents whole-portal freeze)
 
 $uid = (int)($_SESSION['user_id'] ?? 0) ?: null;
@@ -258,10 +261,25 @@ select option{ background:#1b2129; color:#e6e9ee; }
   <div class="row" style="margin-top:8px;">
     <div><label>Live metrics source</label><select id="h-source" onchange="srcChange()">
       <option value="ssh">SSH (bash) — full: processes, kill, services, journal</option>
-      <option value="alloy">Grafana Alloy — system metrics from this box's Alloy</option></select></div>
+      <option value="alloy">Grafana Alloy — system metrics from this box's Alloy</option>
+      <option value="agent" id="h-source-agent">NEURU Agent — a container on the box pushes its metrics (no SSH)</option></select></div>
     <div id="h-alloy-row" style="display:none;"><label>Alloy metrics URL <span class="muted">(blank = http://&lt;ip&gt;:12345/metrics)</span></label><input id="h-alloy" placeholder="http://192.168.0.240:12345/metrics"></div>
   </div>
   <p class="muted" style="margin-top:8px;"><b>SSH</b> needs sshd + a credential on the node (journal read via group <code>systemd-journal</code>; <code>sudo</code> for <code>systemctl</code> restarts). <b>Alloy</b> reads that box's Grafana Alloy directly (no SSH) but is system-level only — events/processes/kill/services still need SSH. Configure Alloy defaults in <b>Site Configuration → Grafana Alloy</b>.</p>
+  <div id="h-agent-note" style="margin-top:8px;display:none;border:1px solid rgba(126,231,135,.35);background:rgba(126,231,135,.08);border-radius:8px;padding:11px 13px;color:#bfe9c6;font-size:12.5px;line-height:1.55;">
+    <b><i class="fas fa-satellite-dish"></i> NEURU Agent — push-based, no SSH.</b> A tiny container runs on the box and <b>pushes</b> 60+ metrics (per-core CPU, memory/swap, per-disk I/O, per-interface network, PSI pressure, TCP states, sensors + Docker). Two ways to get one going:
+    <ol style="margin:7px 0 7px 18px;padding:0;">
+      <li><b>Easiest:</b> <a href="containers.php" style="color:#9df0a5;font-weight:700;">Containers → Deploy → “NEURU Agent”</a> — endpoint + token pre-filled, pick the host, Deploy.</li>
+      <li><b>Or</b> save this host as Agent and run the container on the box — it will <b>adopt this card</b> automatically. Endpoint <code style="color:#9df0a5;"><?= htmlspecialchars($lx_agent_base) ?>/nm_agent_api.php</code>, token <code style="color:#9df0a5;">present in Config → Poller → Remote Agents</code>.</li>
+    </ol>
+    <label style="display:flex;align-items:flex-start;gap:9px;margin-top:9px;padding-top:9px;border-top:1px solid rgba(126,231,135,.2);cursor:pointer;">
+      <input type="checkbox" id="h-agent-events" style="margin-top:2px;">
+      <span><b>Híbrido — también recoger eventos del journal por SSH.</b> Deja las métricas ricas del agente <b>y</b> sigue trayendo los logs (Critical/Error/Warning) por SSH. Requiere una credencial SSH en el nodo. <span style="color:#8aa;">(Sin esto, el agente solo manda métricas de salud, no eventos.)</span></span>
+    </label>
+  </div>
+  <div id="h-agent-leave" style="margin-top:8px;display:none;border:1px solid rgba(247,181,7,.4);background:rgba(247,181,7,.08);border-radius:8px;padding:9px 12px;color:#ffdca1;font-size:12px;">
+    <i class="fas fa-triangle-exclamation"></i> Esta tarjeta tiene un <b>agente conectado</b>. Al cambiarla a SSH/Grafana, el contenedor sigue corriendo en la máquina pero <b>queda en reposo</b> (NEURU lo ignora) — vuelve a “NEURU Agent” cuando quieras y retoma al instante. Para apagarlo del todo, detén el contenedor en el box.
+  </div>
   <div class="actions"><span class="muted" id="h-msg" style="margin-right:auto;"></span>
     <button class="btn ghost" onclick="closeM('hbg')">Cancel</button><button class="btn" onclick="saveHost()">Save</button></div>
 </div></div>
@@ -327,7 +345,11 @@ function lxNodeIp(){ const ip=(document.getElementById('h-host').value||'').trim
 function alloyPrefill(force){ const f=document.getElementById('h-alloy'); const ip=lxNodeIp();
   if(document.getElementById('h-source').value!=='alloy')return;
   if(ip && (force||!f.value.trim())) f.value='http://'+ip+':'+ALLOY_PORT+ALLOY_PATH; }
-function srcChange(){ document.getElementById('h-alloy-row').style.display=document.getElementById('h-source').value==='alloy'?'block':'none'; alloyPrefill(false); }
+function srcChange(){ const sel=document.getElementById('h-source'), v=sel.value;
+  document.getElementById('h-alloy-row').style.display=(v==='alloy')?'block':'none';
+  const an=document.getElementById('h-agent-note'); if(an) an.style.display=(v==='agent')?'block':'none';
+  const lv=document.getElementById('h-agent-leave'); if(lv) lv.style.display=(v!=='agent' && sel.dataset.claimed==='1')?'block':'none';
+  if(v!=='alloy') alloyPrefill(false); }
 if(typeof window.nmLocal!=='function')   window.nmLocal=(u)=>u||'';
 function esc(s){ return (s==null?'':String(s)).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
 function gv(id){ return document.getElementById(id).value; }
@@ -376,16 +398,22 @@ async function pollNow(id){
 }
 function openSsh(){ document.getElementById('sshbg').style.display='flex'; }
 function cpc(id){ const t=document.getElementById(id).textContent; (navigator.clipboard?navigator.clipboard.writeText(t):0); const b=event.currentTarget; const o=b.innerHTML; b.innerHTML='<i class="fas fa-check"></i>'; setTimeout(()=>b.innerHTML=o,1200); }
-function openHost(){ ['h-name','h-host','h-alloy'].forEach(i=>document.getElementById(i).value=''); document.getElementById('h-id').value=''; document.getElementById('h-node').value=''; document.getElementById('h-source').value='ssh'; document.getElementById('h-alloy-row').style.display='none'; document.getElementById('h-title').textContent='Add Linux host'; document.getElementById('h-msg').textContent=''; document.getElementById('hbg').style.display='flex'; }
+function openHost(){ ['h-name','h-host','h-alloy'].forEach(i=>document.getElementById(i).value=''); document.getElementById('h-id').value=''; document.getElementById('h-node').value='';
+  const sel=document.getElementById('h-source'); sel.disabled=false; sel.value='ssh';
+  document.getElementById('h-agent-events').checked=false;
+  document.getElementById('h-title').textContent='Add Linux host'; document.getElementById('h-msg').textContent=''; srcChange(); document.getElementById('hbg').style.display='flex'; }
 function editHost(id){ const h=HOSTS.find(x=>x.id==id); if(!h)return;
   document.getElementById('h-id').value=id; document.getElementById('h-title').textContent='Edit: '+h.name;
   document.getElementById('h-name').value=h.name||''; document.getElementById('h-node').value=h.node_id||''; document.getElementById('h-host').value=h.host_ip||'';
-  document.getElementById('h-source').value=h.source||'ssh'; document.getElementById('h-alloy').value=h.alloy_url||'';
-  document.getElementById('h-alloy-row').style.display=(h.source==='alloy')?'block':'none';
-  document.getElementById('h-msg').textContent=''; document.getElementById('hbg').style.display='flex'; }
+  const sel=document.getElementById('h-source');
+  sel.value=h.source||'ssh'; sel.disabled=false;   // always freely switchable between SSH / Grafana / Agent
+  sel.dataset.claimed = h.agent_uid ? '1' : '';     // for a heads-up when leaving Agent while a container is live
+  document.getElementById('h-alloy').value=h.alloy_url||'';
+  document.getElementById('h-agent-events').checked = !!(+h.agent_ssh_events);
+  document.getElementById('h-msg').textContent=''; srcChange(); document.getElementById('hbg').style.display='flex'; }
 async function saveHost(){
   const id=gv('h-id');
-  const b=new URLSearchParams({action:id?'host_update':'host_add',id,name:gv('h-name'),node_id:gv('h-node'),host_ip:gv('h-host'),source:gv('h-source'),alloy_url:gv('h-alloy'),enabled:'1'});
+  const b=new URLSearchParams({action:id?'host_update':'host_add',id,name:gv('h-name'),node_id:gv('h-node'),host_ip:gv('h-host'),source:gv('h-source'),alloy_url:gv('h-alloy'),agent_ssh_events:document.getElementById('h-agent-events').checked?'1':'0',enabled:'1'});
   const r=await post(b);
   if(r&&r.ok){ closeM('hbg'); loadHosts(); } else document.getElementById('h-msg').innerHTML='<span style="color:var(--crit)">'+(r?esc(r.error):'failed')+'</span>';
 }

@@ -366,10 +366,12 @@ if (!function_exists('nm_n8n_get')) {
         ];
     }
     // The LLM model this customer chose to PAY FOR on a given flow (they pick per-flow in the picker).
-    // Stored as ai_flow_models = {slug: model}; falls back to ai_default_model, then gpt-4o. The hosted
-    // flow's model node reads it as {{ _neuru.model }}. Must be one of the Portal's available_models.
+    // Stored as ai_flow_models = {slug: model}; falls back to ai_default_model, then gpt-4o-mini. The
+    // hosted flow's model node reads it as {{ _neuru.model }}. Must be one of the Portal's available_models.
+    // DEFAULT IS THE CHEAP MODEL ON PURPOSE: an unconfigured flow must never silently pass the priciest
+    // model (gpt-4o ≈ 10× gpt-4o-mini). The customer's explicit per-flow / ai_default_model choice wins.
     function nm_n8n_flow_model($conn, string $slug = ''): string {
-        $def = _nm_set_get($conn, 'ai_default_model', 'gpt-4o'); if ($def === '') $def = 'gpt-4o';
+        $def = _nm_set_get($conn, 'ai_default_model', 'gpt-4o-mini'); if ($def === '') $def = 'gpt-4o-mini';
         if ($slug === '') return $def;
         $map = json_decode(_nm_set_get($conn, 'ai_flow_models', '{}'), true);
         return (is_array($map) && !empty($map[$slug])) ? (string)$map[$slug] : $def;
@@ -380,7 +382,15 @@ if (!function_exists('nm_n8n_get')) {
     function nm_n8n_neuru_stamp($conn, array $payload, string $flow_url = '', string $slug = ''): array {
         if ($flow_url !== '' && !preg_match('#^https?://10\.88\.\d{1,3}\.\d{1,3}\b#', $flow_url)) return $payload;  // local n8n → clean
         $b = nm_n8n_neuru_block($conn);
-        if ($b) { $b['model'] = nm_n8n_flow_model($conn, $slug); $payload['_neuru'] = $b; }
+        if ($b) {
+            $b['model'] = nm_n8n_flow_model($conn, $slug);
+            // Groundwork for per-flow spend attribution: expose the flow slug so a hosted flow can
+            // forward it to LiteLLM as metadata/tags/user (spend_logs_metadata). Until the flow nodes
+            // forward it, this is inert (unknown _neuru fields are ignored by flows). Portal reads it
+            // from /spend/logs to break the ledger down BY FLOW instead of a bare "Metered usage".
+            if ($slug !== '') $b['flow'] = $slug;
+            $payload['_neuru'] = $b;
+        }
         return $payload;
     }
 

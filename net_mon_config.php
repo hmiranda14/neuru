@@ -2689,6 +2689,7 @@ $agent_list  = nm_agent_list($conn);
 $agent_scheme = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS']!=='off') ? 'https' : 'http';
 $agent_host   = $_SERVER['HTTP_HOST'] ?? 'your-neuru-host';
 $agent_base   = $agent_scheme.'://'.$agent_host;
+$agent_selfsigned = nm_agent_selfsigned_likely($agent_scheme, $agent_host);   // self-signed cert → agent must skip TLS verify
 ?>
 <!-- ─── Connections (manual topology wiring) ──────────────────────────────── -->
 <div id="tab-links" class="tab-panel <?= $tab==='links'?'active':'' ?>">
@@ -2858,41 +2859,6 @@ $agent_base   = $agent_scheme.'://'.$agent_host;
 
 </div><!-- /2-col -->
 
-<!-- Recent Poller Log -->
-<?php if ($poll_log): ?>
-<div class="glass-card" style="margin-top:20px;">
-    <h3 style="margin:0 0 14px;font-size:14px;color:var(--accent);"><i class="fas fa-list"></i> Recent Poll History</h3>
-    <table style="width:100%;border-collapse:collapse;font-size:12px;">
-        <thead><tr>
-            <?php foreach (['Time','Duration','Nodes','Ports','Errors','Status'] as $h): ?>
-            <th style="color:#555;font-size:10px;text-transform:uppercase;letter-spacing:1px;padding:5px 10px;text-align:left;border-bottom:1px solid var(--border);"><?= $h ?></th>
-            <?php endforeach ?>
-        </tr></thead>
-        <tbody>
-        <?php foreach ($poll_log as $pl): ?>
-        <tr style="border-bottom:1px solid rgba(255,255,255,.04);">
-            <td style="padding:6px 10px;color:#aaa;"><?= $pl['ran_at'] ?></td>
-            <td style="padding:6px 10px;color:#888;"><?= $pl['duration_ms'] ?>ms</td>
-            <td style="padding:6px 10px;color:#888;"><?= $pl['nodes_polled'] ?></td>
-            <td style="padding:6px 10px;color:#888;"><?= $pl['ports_polled'] ?></td>
-            <td style="padding:6px 10px;color:<?= $pl['errors']>0?'#e74c3c':'#555' ?>;"><?= $pl['errors'] ?></td>
-            <td style="padding:6px 10px;">
-                <span style="background:<?= $pl['status']==='ok'?'rgba(46,204,113,.2)':'rgba(243,156,18,.2)' ?>;
-                             color:<?= $pl['status']==='ok'?'#2ecc71':'#f39c12' ?>;
-                             padding:2px 8px;border-radius:10px;font-size:10px;"><?= htmlspecialchars($pl['status']) ?></span>
-            </td>
-        </tr>
-        <?php endforeach ?>
-        </tbody>
-    </table>
-</div>
-<?php else: ?>
-<div class="glass-card" style="margin-top:20px;text-align:center;padding:30px;color:#555;">
-    <i class="fas fa-history" style="font-size:28px;margin-bottom:10px;display:block;"></i>
-    No poll history yet. Run the poller script to start collecting data.
-</div>
-<?php endif ?>
-
 <!-- ═══ Remote Agents (neuru-agent) ═══════════════════════════════════════════ -->
 <div class="glass-card" style="margin-top:20px;">
     <h3 style="margin:0 0 6px;font-size:14px;color:var(--accent);display:flex;align-items:center;gap:8px;">
@@ -2904,6 +2870,16 @@ $agent_base   = $agent_scheme.'://'.$agent_host;
         NAT/CGNAT. Agents <b>offload polling from this server</b>, so you scale to thousands of nodes. Each registers itself
         with the enrollment token below and appears in the <a href="linux.php" style="color:var(--accent);">Linux Monitor</a>.
     </p>
+    <div style="margin:0 0 16px;padding:12px 16px;border:1px solid rgba(126,231,135,.35);background:rgba(126,231,135,.08);border-radius:10px;font-size:12.5px;color:#bfe9c6;display:flex;gap:12px;align-items:center;flex-wrap:wrap;">
+        <i class="fas fa-wand-magic-sparkles" style="color:#7ee787;font-size:16px;"></i>
+        <div style="flex:1;min-width:260px;">
+            <b>Easiest way — one-click deploy.</b> Push this agent to any Docker host you manage straight from NEURU:
+            <a href="containers.php" style="color:#9df0a5;font-weight:700;">Containers → Deploy → “NEURU Agent”</a>.
+            The endpoint URL and token below are <b>pre-filled</b> — just pick a host and click Deploy (needs Portainer configured).
+        </div>
+        <a href="containers.php" class="btn btn-sm" style="white-space:nowrap;"><i class="fas fa-rocket"></i> Deploy an agent</a>
+    </div>
+    <p style="font-size:12px;color:#889;margin:-4px 0 16px;">Or install it manually on a box with the <b>docker-compose.yml</b> on the right.</p>
     <?php if (!empty($_GET['agtok'])): ?>
     <div class="alert-ok" style="margin-bottom:12px;"><i class="fas fa-check"></i> Enrollment token rotated — existing agents must be updated with the new token.</div>
     <?php endif ?>
@@ -2950,7 +2926,8 @@ services:
       NEURU_TOKEN: "<?= htmlspecialchars($agent_token) ?>"
       # NEURU_HOSTNAME: "web-01"   # optional; defaults to the box hostname
       NEURU_INTERVAL: "30"          # seconds between pushes
-    volumes:
+<?php if ($agent_selfsigned): ?>      NEURU_VERIFY_TLS: "0"         # this NEURU uses a self-signed cert — don't verify
+<?php endif ?>    volumes:
       - /proc:/host/proc:ro
       - /sys:/host/sys:ro
       - /:/host/root:ro
@@ -3002,6 +2979,41 @@ function agCopy(id){ var el=document.getElementById(id); el.select(); el.setSele
   try{ navigator.clipboard.writeText(el.value); }catch(e){ document.execCommand('copy'); }
 }
 </script>
+
+<!-- Recent Poller Log -->
+<?php if ($poll_log): ?>
+<div class="glass-card" style="margin-top:20px;">
+    <h3 style="margin:0 0 14px;font-size:14px;color:var(--accent);"><i class="fas fa-list"></i> Recent Poll History</h3>
+    <table style="width:100%;border-collapse:collapse;font-size:12px;">
+        <thead><tr>
+            <?php foreach (['Time','Duration','Nodes','Ports','Errors','Status'] as $h): ?>
+            <th style="color:#555;font-size:10px;text-transform:uppercase;letter-spacing:1px;padding:5px 10px;text-align:left;border-bottom:1px solid var(--border);"><?= $h ?></th>
+            <?php endforeach ?>
+        </tr></thead>
+        <tbody>
+        <?php foreach ($poll_log as $pl): ?>
+        <tr style="border-bottom:1px solid rgba(255,255,255,.04);">
+            <td style="padding:6px 10px;color:#aaa;"><?= $pl['ran_at'] ?></td>
+            <td style="padding:6px 10px;color:#888;"><?= $pl['duration_ms'] ?>ms</td>
+            <td style="padding:6px 10px;color:#888;"><?= $pl['nodes_polled'] ?></td>
+            <td style="padding:6px 10px;color:#888;"><?= $pl['ports_polled'] ?></td>
+            <td style="padding:6px 10px;color:<?= $pl['errors']>0?'#e74c3c':'#555' ?>;"><?= $pl['errors'] ?></td>
+            <td style="padding:6px 10px;">
+                <span style="background:<?= $pl['status']==='ok'?'rgba(46,204,113,.2)':'rgba(243,156,18,.2)' ?>;
+                             color:<?= $pl['status']==='ok'?'#2ecc71':'#f39c12' ?>;
+                             padding:2px 8px;border-radius:10px;font-size:10px;"><?= htmlspecialchars($pl['status']) ?></span>
+            </td>
+        </tr>
+        <?php endforeach ?>
+        </tbody>
+    </table>
+</div>
+<?php else: ?>
+<div class="glass-card" style="margin-top:20px;text-align:center;padding:30px;color:#555;">
+    <i class="fas fa-history" style="font-size:28px;margin-bottom:10px;display:block;"></i>
+    No poll history yet. Run the poller script to start collecting data.
+</div>
+<?php endif ?>
 
 </div><!-- /tab-poller -->
 
