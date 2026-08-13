@@ -20,7 +20,7 @@ Env:
   UTIL_ROOT      shared file store (default /srv/neuru-utils)
   VERIFY_TLS     "0" to skip TLS verify (self-signed NEURU) (default 1)
 """
-import os, sys, ssl, json, time, socket, hashlib, subprocess, urllib.request, urllib.error, urllib.parse
+import os, sys, ssl, re, json, time, socket, hashlib, subprocess, urllib.request, urllib.error, urllib.parse
 
 AGENT_VERSION = "0.1.0"
 NEURU_URL   = os.environ.get("NEURU_URL", "").rstrip("/")
@@ -154,6 +154,7 @@ def r_http(c):
     open(cfg,"w").write(
         "worker_processes 1;\nerror_log /var/log/neuru-util/nginx.err;\npid /run/nginx_util.pid;\n"
         "events { worker_connections 256; }\nhttp {\n include /etc/nginx/mime.types;\n"
+        " access_log /var/log/neuru-util/http_access.log;\n"
         f" server {{\n  listen {port};\n  root {root};\n  autoindex {autoindex};\n  location / {{ {dav} }}\n }}\n}}\n")
     return f"nginx -c {cfg} -g 'daemon off;'"
 
@@ -186,14 +187,106 @@ def r_syslog(c):
         f'*.* ?RemoteFile\n{fwd}')
     return f"rsyslogd -n -f {cfg}"
 
+def r_dnsmasq(c):
+    root=c.get("tftp_root",f"{ROOT}/tftp"); ensure_dir(root)
+    lines=["port=0" if not c.get("dns") else "port=53","log-dhcp","bind-interfaces"]
+    if c.get("dns"):
+        lines=["port=53","domain-needed","bogus-priv","expand-hosts",f"domain={c.get('domain','lan')}"]
+        for u in str(c.get("dns_upstream","1.1.1.1")).split(","):
+            u=u.strip();
+            if u: lines.append(f"server={u}")
+    if c.get("proxydhcp"):
+        subnet=str(c.get("proxy_subnet","")).strip()
+        if subnet: lines.append(f"dhcp-range={subnet},proxy")
+        lines.append("enable-tftp"); lines.append(f"tftp-root={root}")
+        if c.get("ipxe"):
+            # PXE → chainload iPXE → NEURU boot menu
+            lines += ["dhcp-match=set:ipxe,175",
+                      "dhcp-boot=tag:!ipxe,undionly.kpxe",
+                      "dhcp-boot=tag:ipxe,menu.ipxe"]
+            # write the iPXE menu from NEURU config
+            menu=["#!ipxe","menu NEURU Boot"]
+            for ln in str(c.get("boot_menu","")).splitlines():
+                if "|" in ln:
+                    lbl,url=ln.split("|",1); menu.append(f"item {url.strip()} {lbl.strip()}")
+            menu+=["choose target && chain ${target}"]
+            try: open(os.path.join(root,"menu.ipxe"),"w").write("\n".join(menu)+"\n")
+            except Exception: pass
+    open("/etc/dnsmasq_util.conf","w").write("\n".join(lines)+"\n")
+    return "dnsmasq -k -C /etc/dnsmasq_util.conf"
+
+def r_listeners(c):
+    tcp=str(c.get("tcp_ports","")).strip(); udp=str(c.get("udp_ports","")).strip()
+    banner=c.get("banner","NEURU-UTIL-OK")
+    return f"python3 /opt/neuru/util-listeners.py --tcp '{tcp}' --udp '{udp}' --banner '{banner}'"
+
 RENDERERS = {
     "filebrowser": r_filebrowser, "tftp": r_tftp, "sftp": r_sftp, "ftp": r_ftp,
     "http": r_http, "ntp": r_ntp, "iperf3": r_iperf3, "syslog": r_syslog,
+    "dnsmasq": r_dnsmasq, "listeners": r_listeners,
 }
 VERSIONS = {  # best-effort version string reported per service
     "tftp":"tftpd-hpa","sftp":"openssh","ftp":"vsftpd","http":"nginx","ntp":"chrony",
     "iperf3":"iperf3","syslog":"rsyslog","filebrowser":"filebrowser",
 }
+
+# ── command / task channel (NEURU → agent) ───────────────────────────────────
+def _safe_join(rel):
+    p = os.path.normpath(os.path.join(ROOT, str(rel).lstrip("/")))
+    if not p.startswith(os.path.abspath(ROOT)): raise ValueError("path escape")
+    return p
+
+def cmd_wol(a):
+    mac = str(a.get("mac","")).replace(":","").replace("-","").replace(".","")
+    if len(mac) != 12: return {"error":"bad mac"}
+    pkt = bytes.fromhex("ff"*6 + mac*16)
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+    s.sendto(pkt, ("255.255.255.255", 9)); s.sendto(pkt, ("255.255.255.255", 7)); s.close()
+    return {"sent": True, "mac": a.get("mac")}
+
+def cmd_iperf(a):
+    tgt=str(a.get("target","")); port=int(a.get("port",5201)); dur=int(a.get("duration",5))
+    r=subprocess.run(["iperf3","-c",tgt,"-p",str(port),"-t",str(dur),"-J"],capture_output=True,text=True,timeout=dur+25)
+    try:
+        j=json.loads(r.stdout); s=j["end"]["sum_received"]["bits_per_second"]
+        return {"mbps":round(s/1e6,2),"target":tgt,"seconds":dur}
+    except Exception as e:
+        return {"error":(r.stderr.strip() or str(e))[:200]}
+
+def cmd_tcp_test(a):
+    host=str(a.get("host","")); port=int(a.get("port",0)); t0=time.time()
+    try:
+        c=socket.create_connection((host,port),timeout=5); c.close()
+        return {"open":True,"ms":round((time.time()-t0)*1000,1)}
+    except Exception as e:
+        return {"open":False,"error":str(e)[:120]}
+
+def cmd_udp_test(a):
+    host=str(a.get("host","")); port=int(a.get("port",0))
+    try:
+        s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); s.settimeout(3); s.sendto(b"NEURU-PROBE",(host,port))
+        try: s.recvfrom(512); ans=True
+        except Exception: ans=False
+        s.close(); return {"sent":True,"replied":ans}
+    except Exception as e:
+        return {"error":str(e)[:120]}
+
+def cmd_write_file(a):
+    rel=str(a.get("path","")); content=str(a.get("content",""))
+    fp=_safe_join(rel); ensure_dir(os.path.dirname(fp)); open(fp,"w").write(content)
+    return {"written":rel,"bytes":len(content)}
+
+COMMANDS = {"wol":cmd_wol,"iperf":cmd_iperf,"tcp_test":cmd_tcp_test,"udp_test":cmd_udp_test,"write_file":cmd_write_file}
+
+def run_commands(cmds):
+    out=[]
+    for c in cmds or []:
+        cid=c.get("id"); fn=COMMANDS.get(c.get("cmd"))
+        if not fn: out.append({"id":cid,"status":"error","result":{"error":"unknown command"}}); continue
+        try: out.append({"id":cid,"status":"done","result":fn(c.get("args",{}) or {})})
+        except Exception as e: out.append({"id":cid,"status":"error","result":{"error":str(e)[:200]}})
+        log(f"cmd {c.get('cmd')} -> {out[-1]['status']}")
+    return out
 
 # ── reconcile ────────────────────────────────────────────────────────────────
 def reconcile(desired):
@@ -232,6 +325,30 @@ def scan_files():
             if len(out)>=5000: return out
     return out
 
+_GRAB_OFF="/var/lib/neuru-util-agent/http.offset"
+def scan_grabs():
+    """Tail the HTTP access log for firmware/ZTP downloads → grab events (firmware audit +
+    ZTP 'served' confirmation). TFTP grabs aren't logged by default (documented limitation)."""
+    lp="/var/log/neuru-util/http_access.log"
+    if not os.path.exists(lp): return []
+    try: off=int(open(_GRAB_OFF).read().strip())
+    except Exception: off=0
+    ev=[]
+    try:
+        if off>os.path.getsize(lp): off=0
+        with open(lp, errors="replace") as f:
+            f.seek(off)
+            for line in f:
+                m=re.search(r'^(\S+).*"(?:GET|HEAD) (\S+) ', line)
+                if not m: continue
+                path=m.group(2)
+                if "/ztp/" in path or "/firmware/" in path:
+                    ev.append({"service":"http","type":"grab","ref":m.group(1),"detail":{"file":path.lstrip("/")}})
+            off=f.tell()
+        open(_GRAB_OFF,"w").write(str(off))
+    except Exception: pass
+    return ev[:200]
+
 def load_state():
     try: return json.load(open(STATE_FILE))
     except Exception: return {}
@@ -266,7 +383,13 @@ def main():
                 # still collect current states cheaply
                 for n in RENDERERS:
                     if os.path.exists(f"{SUPERVISOR_D}/util-{n}.conf"): states[n]={"state":"running","version":VERSIONS.get(n)}
+            # execute any queued commands (wol / iperf / tcp_test / write_file / …)
+            cmd_results = run_commands(d.get("commands"))
+        else:
+            cmd_results = []
         report={"uid":U,"applied_rev":applied,"services":states}
+        if cmd_results: report["command_results"]=cmd_results
+        report["events"]=scan_grabs()
         files_tick+=1
         if files_tick % 5 == 1:   # refresh the file manifest every ~5 polls
             report["files"]=scan_files()

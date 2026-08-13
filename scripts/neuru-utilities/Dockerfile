@@ -7,7 +7,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
       supervisor python3 ca-certificates curl \
       tftpd-hpa openssh-server vsftpd nginx-light chrony iperf3 rsyslog \
-      openssl procps iproute2 \
+      dnsmasq openssl procps iproute2 \
  && rm -rf /var/lib/apt/lists/* \
  && mkdir -p /var/log/neuru-util /srv/neuru-utils/tftp /srv/neuru-utils/firmware \
              /srv/neuru-utils/backups /srv/neuru-utils/images /srv/neuru-utils/ztp \
@@ -22,10 +22,14 @@ RUN set -eux; \
     if [ -s /tmp/fb.tar.gz ]; then tar -xzf /tmp/fb.tar.gz -C /usr/local/bin filebrowser && chmod +x /usr/local/bin/filebrowser; fi; \
     rm -f /tmp/fb.tar.gz
 
+# dnsmasq ships enabled as a system service — we manage it via supervisord instead
+RUN systemctl disable dnsmasq 2>/dev/null || true; rm -f /etc/dnsmasq.d/* 2>/dev/null || true
+
 COPY util-agent.py /opt/neuru/util-agent.py
+COPY util-listeners.py /opt/neuru/util-listeners.py
 COPY supervisord.conf /etc/supervisor/supervisord.conf
 COPY entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh /opt/neuru/util-agent.py
+RUN chmod +x /entrypoint.sh /opt/neuru/util-agent.py /opt/neuru/util-listeners.py
 
 # host networking is expected (TFTP/NTP/DHCP/syslog need real ports); ports listed for docs
 EXPOSE 69/udp 123/udp 514/udp 2222/tcp 21/tcp 8080/tcp 8088/tcp 5201/tcp
