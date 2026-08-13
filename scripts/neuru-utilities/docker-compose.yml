@@ -1,0 +1,21 @@
+# NEURU Utilities — deploy next to your network. host networking is used because
+# TFTP/NTP/DHCP/syslog need real ports + broadcast. All services are then turned
+# on/off and configured from NEURU → Utilities. Nothing to edit on this box.
+services:
+  neuru-utilities:
+    image: ghcr.io/hmiranda14/neuru-utilities:latest
+    container_name: neuru-utilities
+    restart: unless-stopped
+    network_mode: host          # TFTP(69) NTP(123) syslog(514) DHCP/PXE need host ports
+    environment:
+      NEURU_URL: "https://YOUR-NEURU-HOST"   # ← your NEURU base URL
+      UTIL_TOKEN: "PASTE-ENROLMENT-TOKEN"    # ← from NEURU → Utilities → Deploy
+      # UTIL_NAME: "site-a-utilities"        # optional friendly name
+      # VERIFY_TLS: "0"                      # set if NEURU uses a self-signed cert
+      POLL_SECONDS: "20"
+    volumes:
+      - neuru_utils_store:/srv/neuru-utils   # shared file store (firmware/backups/tftp/images)
+    # For Ser2Net (serial-over-IP, Phase 3) add e.g.:  devices: ["/dev/ttyUSB0:/dev/ttyUSB0"]
+
+volumes:
+  neuru_utils_store:
