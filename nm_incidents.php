@@ -166,11 +166,18 @@ if (!function_exists('nm_inc_collect')) {
         // 5) NetFlow bandwidth (network-wide / per-app)
         try {
             $r = $conn->query("SELECT id,scope,severity,value_mbps,threshold_mbps,opened_at FROM nm_netflow_alerts WHERE status='open'");
-            while ($r && $x = $r->fetch_assoc()) $sig[] = ['source'=>'netflow','severity'=>nm_inc_norm_sev($x['severity']),
-                'entity'=>$x['scope'], 'node_id'=>null,
-                'title'=>'High bandwidth: '.$x['scope'].' ('.round((float)$x['value_mbps'],1).' Mbps)',
-                'detail'=>'NetFlow bandwidth anomaly', 'fingerprint'=>'netflow:'.$x['id'],
-                'first_seen'=>$x['opened_at'], 'last_seen'=>$x['opened_at'], 'link'=>'netflow.php'];
+            if (!function_exists('nm_nf_scope_talkers')) { try { require_once __DIR__.'/nm_netflow.php'; } catch (\Throwable $e) {} }
+            while ($r && $x = $r->fetch_assoc()) {
+                $tk = []; try { if (function_exists('nm_nf_scope_talkers')) $tk = nm_nf_scope_talkers($conn, (string)$x['scope'], 10, 4); } catch (\Throwable $e) {}
+                $tline = $tk ? nm_nf_talkers_line($conn, $tk) : '';
+                $ttop  = $tk ? (' - top ' . $tk[0]['src'] . ' -> ' . $tk[0]['dst'] . ':' . $tk[0]['port']) : '';
+                $sig[] = ['source'=>'netflow','severity'=>nm_inc_norm_sev($x['severity']),
+                    'entity'=>$x['scope'], 'node_id'=>null,
+                    'title'=>'High bandwidth: '.$x['scope'].' ('.round((float)$x['value_mbps'],1).' Mbps)'.$ttop,
+                    'detail'=> $tline !== '' ? ('Top talkers (last 10m, '.$x['scope'].'): '.$tline) : 'NetFlow bandwidth anomaly',
+                    'fingerprint'=>'netflow:'.$x['id'],
+                    'first_seen'=>$x['opened_at'], 'last_seen'=>$x['opened_at'], 'link'=>'netflow.php'];
+            }
         } catch (\Throwable $e) {}
 
         // 6) Container network alerts
@@ -404,7 +411,7 @@ if (!function_exists('nm_inc_correlate')) {
                 : $root['title'], 255);
 
             // upsert incident by corr_key
-            $ir = $conn->query("SELECT id,status FROM nm_incidents WHERE corr_key='".$conn->real_escape_string($key)."' LIMIT 1");
+            $ir = $conn->query("SELECT id,status,acked_at,muted_at,resolved_at FROM nm_incidents WHERE corr_key='".$conn->real_escape_string($key)."' LIMIT 1");
             $existing = $ir ? $ir->fetch_assoc() : null;
             $impactStr  = nm_inc_clean(implode(', ', array_slice($impact, 0, 30)), 1000);
             $rootNodeId = $root['_root_node'] ?? ($root['node_id'] ?? null);
@@ -412,6 +419,40 @@ if (!function_exists('nm_inc_correlate')) {
             $rootHost   = isset($root['host']) && $root['host'] !== null ? nm_inc_clean($root['host'], 255) : null;
             if ($existing) {
                 $incId = (int)$existing['id'];
+                // ── STALE-RECURRENCE GATE ────────────────────────────────────────────────
+                // A signal must only (re)activate/reopen an incident if it genuinely happened
+                // AFTER the operator's last action (ack/mute) or after it auto-resolved — i.e.
+                // its last_seen is newer than that stamp. Event-based sources (container errors,
+                // config drift, …) keep a FIXED last_seen for the single occurrence and linger in
+                // the correlation lookback window for hours; without this gate, acknowledging such
+                // an incident was futile — the very next correlation pass re-activated the SAME old
+                // signal (ON DUPLICATE KEY … status='active') and the incident "kept appearing"
+                // even though nothing new had happened. Continuously-refreshed conditions (a node
+                // that is STILL down stamps last_seen=$now every pass) pass the gate naturally, so
+                // an ack on a genuinely-ongoing problem still holds it visible. Only what did NOT
+                // recur since the operator acted is suppressed → it drops off the active board and
+                // auto-resolves; a real fresh occurrence reopens it as before.
+                $curStatus = $existing['status'];
+                $refTime = null;
+                if     ($curStatus === 'acknowledged') $refTime = $existing['acked_at']    ?? null;
+                elseif ($curStatus === 'muted')        $refTime = $existing['muted_at']    ?? null;
+                elseif ($curStatus === 'resolved')     $refTime = $existing['resolved_at'] ?? null;
+                if ($refTime) {
+                    $refTs = strtotime((string)$refTime);
+                    $freshAfterRef = false;
+                    foreach ($sigs as $s) {
+                        $ls = strtotime((string)($s['last_seen'] ?: $now));
+                        if ($ls !== false && $refTs !== false && $ls > $refTs) { $freshAfterRef = true; break; }
+                    }
+                    if (!$freshAfterRef) {
+                        // Same occurrence the operator already handled — do NOT resurrect its signals
+                        // and do NOT keep it on the active board. Drop it from "seen" so the
+                        // auto-resolve pass closes an acknowledged/muted one; a resolved one just
+                        // stays resolved (no flap back to open on the stale signal).
+                        unset($seenKeys[$key]);
+                        continue;
+                    }
+                }
                 $newStatus = $existing['status'] === 'resolved' ? 'open' : $existing['status']; // reopen if it had cleared
                 if ($existing['status'] === 'resolved') $opened++; else $updated++;
                 $st = $conn->prepare("UPDATE nm_incidents SET title=?,severity=?,status=?,root_source=?,root_entity=?,root_host=?,root_node_id=?,signal_count=?,impact_count=?,impact=?,updated_at=?,resolved_at=NULL WHERE id=?");

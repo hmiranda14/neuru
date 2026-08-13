@@ -110,6 +110,10 @@ def worker_count(cur, n_nodes):
 def main():
     db = mysql.connector.connect(**DB, autocommit=False)
     cur = db.cursor()
+
+    from nm_job_gate import should_run
+    if not should_run(cur, db, 'nm_ping'):
+        cur.close(); db.close(); return
     ensure_table(cur)
     db.commit()
 

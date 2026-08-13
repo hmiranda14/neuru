@@ -14,4 +14,8 @@ EP="$1"
 EP=$(basename "$EP")
 TOK=$(php "$APP/scripts/nm_inbound_token.php" 2>/dev/null)
 [ -n "$TOK" ] || exit 0   # no token yet (DB not ready) → skip this tick, try next minute
+# Scheduled-Jobs gate (net_mon_config -> Scheduled Jobs): skip ONLY on an explicit "skip"
+# (disabled or throttled in nm_job_schedule). Any other result (run/empty/error) -> run = FAIL-OPEN.
+GATE=$(curl -s -m 8 -H "X-NetMon-Token: $TOK" "http://localhost/nm_job_gate.php?job=$EP" 2>/dev/null)
+[ "$GATE" = "skip" ] && exit 0
 curl -s -H "X-NetMon-Token: $TOK" "http://localhost/$EP" >/dev/null 2>&1

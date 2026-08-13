@@ -1181,6 +1181,10 @@ def poll(only_node=None):
     db  = get_db()
     cur = db.cursor()
 
+    from nm_job_gate import should_run
+    if not should_run(cur, db, 'nm_poller'):
+        cur.close(); db.close(); return
+
     ensure_tables(cur)
     db.commit()
 

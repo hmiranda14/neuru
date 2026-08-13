@@ -696,6 +696,14 @@ function nm_ap2_dispatch($conn, int $signal_id, string $trigger='signal'): array
         'bot'=>'NEURU', 'context'=>$ctx, 'tools'=>nm_ap2_tools(), 'rules'=>$rules, 'history'=>[],
         'callback'=>['think'=>"$api?ep=think",'tool'=>"$api?ep=tool",'propose'=>"$api?ep=propose",'finish'=>"$api?ep=finish",'narrate'=>"$api?ep=narrate"],
     ];
+    // Books RAG — attach reference-book context for this signal (ADDITIVE; the flow uses docs_text if wired). Never breaks the brain.
+    try { require_once __DIR__.'/nm_solutionkb.php';
+        if (function_exists('nm_kb_search_books')) {
+            $sig=$ctx['signal']??[]; $bq=trim((string)($sig['title']??'').' '.(string)($sig['summary']??$sig['text']??$sig['detail']??''));
+            if ($bq==='') $bq=trim((string)($sig['kind']??'').' '.(string)($dev['kind']??''));
+            if ($bq!==''){ $__bk=nm_kb_search_books($conn,$bq); $payload['docs']=$__bk; $payload['docs_text']=nm_kb_docs_context($__bk); }
+        }
+    } catch (\Throwable $e) {}
     // non-blocking: an 8s timeout means "dispatched, working async" — only a connect error fails.
     [$code,$resp,$err] = nm_n8n_call($conn,'autopilot-v2',$payload,8);
     if ($code===0 && $err && stripos($err,'timed out')===false) {
@@ -994,6 +1002,10 @@ function nm_ap2_chat_exchange($conn, string $msg, string $by = 'operator', bool 
         'tools' => nm_ap2_chat_tools(),
         'callback' => ['tool' => $cbase . '/autopilotv2_api.php?ep=chat_tool'],
         'bot_state' => ['watching' => $watching, 'rules' => $rules, 'signals_in_flight' => $inflight, 'enabled' => nm_ap2_enabled($conn)]];
+    // Books RAG — attach reference-book context for the user's question (ADDITIVE; flow uses docs_text if wired). Never breaks the chat.
+    try { require_once __DIR__.'/nm_solutionkb.php';
+        if (function_exists('nm_kb_search_books') && trim((string)$msg)!==''){ $__bk=nm_kb_search_books($conn,(string)$msg); $payload['docs']=$__bk; $payload['docs_text']=nm_kb_docs_context($__bk); }
+    } catch (\Throwable $e) {}
     [$code, $resp, $err] = function_exists('nm_n8n_call') ? nm_n8n_call($conn, 'autopilot-v2-chat', $payload, 40) : [0, null, 'n8n unavailable'];
     $reply = ''; $command = null;
     if (is_array($resp)) { $reply = (string)($resp['reply'] ?? ''); $command = $resp['command'] ?? null; }

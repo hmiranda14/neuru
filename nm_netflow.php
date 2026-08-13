@@ -123,6 +123,47 @@ if (!function_exists('nm_nf_app_name')) {
     }
 }
 
+// Top src->dst talkers behind a NetFlow bandwidth alert scope (app label) over the recent window,
+// so 'High bandwidth: HTTPS' becomes 'who is talking to whom'. Read-only, index-backed, bounded.
+if (!function_exists('nm_nf_scope_talkers')) {
+    function nm_nf_scope_talkers($conn, string $scope, int $winMin = 10, int $limit = 4): array {
+        $scope = trim($scope);
+        $ports = [];
+        foreach (nm_nf_port_map() as $pp => $lab) { if (strcasecmp($lab, $scope) === 0) $ports[] = (int)$pp; }
+        $where = 'bucket >= (NOW() - INTERVAL ' . max(1, (int)$winMin) . ' MINUTE)';
+        if ($ports) { $where .= ' AND app_port IN (' . implode(',', $ports) . ')'; }
+        elseif (preg_match('#/(\d+)$#', $scope, $m)) { $where .= ' AND app_port = ' . (int)$m[1]; }
+        $limit = max(1, min(20, $limit)); $sec = max(60, $winMin * 60); $out = [];
+        try {
+            $r = $conn->query("SELECT src_ip, dst_ip, app_port, protocol, MAX(bb) peak, SUM(bb) tot FROM (
+                                 SELECT src_ip, dst_ip, app_port, protocol, bucket, SUM(bytes) bb
+                                 FROM nm_netflow_flows WHERE $where
+                                 GROUP BY src_ip, dst_ip, app_port, protocol, bucket) q
+                               GROUP BY src_ip, dst_ip, app_port, protocol
+                               ORDER BY tot DESC LIMIT $limit");
+            while ($r && $x = $r->fetch_assoc()) $out[] = [
+                'src' => $x['src_ip'], 'dst' => $x['dst_ip'], 'port' => (int)$x['app_port'],
+                'proto' => nm_nf_proto_name((int)$x['protocol']),
+                'mbps' => round(((float)$x['peak'] * 8) / 60 / 1e6, 2),
+            ];
+        } catch (\Throwable $e) {}
+        return $out;
+    }
+    // One human-readable line of the top talkers, with a GeoIP flag for the public side when available.
+    function nm_nf_talkers_line($conn, array $talkers): string {
+        if (!function_exists('nm_geo_badge')) { try { require_once __DIR__ . '/nm_nettools.php'; } catch (\Throwable $e) {} }
+        $parts = [];
+        foreach ($talkers as $t) {
+            $geo = '';
+            if (function_exists('nm_geo_badge')) { foreach ([$t['dst'], $t['src']] as $ip) {
+                try { $b = nm_geo_badge($conn, $ip); } catch (\Throwable $e) { $b = null; }
+                if ($b) { $geo = ' (' . trim(($b['cc'] ?? '') . ' ' . ($b['country'] ?? '')) . ')'; break; } } }
+            $parts[] = $t['src'] . ' -> ' . $t['dst'] . ':' . $t['port'] . ' ' . $t['mbps'] . ' Mbps' . $geo;
+        }
+        return implode('  |  ', $parts);
+    }
+}
+
 // ── Time-window helper ───────────────────────────────────────────────────────
 if (!function_exists('nm_nf_window')) {
     // Returns [minutes, bucket_seconds] for a range key.

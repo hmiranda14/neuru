@@ -50,12 +50,16 @@ if ($api === 'ask') {
     nm_audit($conn, 'copilot.ask', ['target_type'=>'copilot',
         'details'=>['q'=>mb_substr($question,0,200),'page'=>$context['page'] ?? '']]);
 
+    // Books RAG — reference-book passages for this question (ADDITIVE; flow uses docs_text if wired). Never breaks the copilot.
+    $__bk=[]; try { require_once __DIR__.'/nm_solutionkb.php'; if (function_exists('nm_kb_search_books')) $__bk=nm_kb_search_books($conn,$question); } catch (\Throwable $e) {}
     [$code, $resp, $err] = nm_n8n_call($conn, 'netops-copilot', [
         'event'     => 'copilot_chat',
         'question'  => $question,
         'history'   => $history,
         'context'   => $context,
         'portal_kb' => $portal_kb,
+        'docs'      => $__bk,
+        'docs_text' => (function_exists('nm_kb_docs_context')?nm_kb_docs_context($__bk):''),
     ]);
     if ($err) {
         echo json_encode(['ok'=>false,'err'=>$err,

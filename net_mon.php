@@ -563,7 +563,38 @@ foreach ($NM_NODES as $did => $nd) {
             'type'        => $_mt,
             'monitor'     => $_mt,
         ];
-        $health_map[$did] = ['cpu' => [], 'mem' => [], 'storage' => [], 'other' => []];
+        if ($_mt === 'agent') {
+            // Agent nodes push CPU / Memory / storage into nm_device_stats (the bridge) → render their
+            // metrics on the card exactly like an SNMP node, instead of a bare ping-only card.
+            $health_map[$did] = ['cpu' => [], 'mem' => [], 'storage' => [], 'other' => []];
+            $hres = $conn->query("SELECT metric_type, metric_key, value, raw_value FROM nm_device_stats
+                WHERE node_id={$ndid} AND recorded_at = (SELECT MAX(recorded_at) FROM nm_device_stats WHERE node_id={$ndid})");
+            if ($hres) while ($h = $hres->fetch_assoc()) { $v = (float)$h['value']; switch ($h['metric_type']) {
+                case 'cpu':     if ($h['metric_key'] === 'avg') break; $health_map[$did]['cpu'][] = ['processor_descr' => ucfirst($h['metric_key']), 'processor_usage' => $v]; break;
+                case 'memory':  $used = (float)$h['raw_value']; $tot = $v > 0 ? $used / ($v / 100) : 0; $health_map[$did]['mem'][] = ['mempool_descr' => ucwords($h['metric_key']), 'mempool_perc' => $v, 'mempool_used' => $used, 'mempool_total' => $tot]; break;
+                case 'storage': $used = (float)$h['raw_value']; $tot = $v > 0 ? $used / ($v / 100) : 0; $health_map[$did]['storage'][] = ['storage_descr' => ucwords($h['metric_key']), 'storage_perc' => $v, 'storage_used' => $used, 'storage_size' => $tot]; break;
+            } }
+            // Agent nodes ALSO push per-interface traffic (bridge → nm_port_stats). Reshape the native
+            // rows (show_graph=1) into LibreNMS port objects — exactly like the SNMP/Alloy path below —
+            // so the card renders the same interface line + "N/N ports" count. Without this, the
+            // `continue` below skipped $ports_map for agent nodes → CPU/Mem showed but interfaces did NOT.
+            if (!empty($NATIVE_PORTS[$ndid])) {
+                $pm = [];
+                foreach ($NATIVE_PORTS[$ndid] as $np) {
+                    $pm[] = [
+                        'port_id'          => $np['port_id'],
+                        'ifName'           => $np['ifName'],   'ifDescr'      => $np['ifName'],
+                        'ifAlias'          => $np['ifAlias'],  'ifOperStatus' => $np['ifOperStatus'],
+                        'ifAdminStatus'    => 'up',            'ifSpeed'      => $np['ifSpeed'],
+                        'ifInOctets_rate'  => $np['ifInOctets_rate'],
+                        'ifOutOctets_rate' => $np['ifOutOctets_rate'], 'ifType' => '',
+                    ];
+                }
+                $ports_map[$did] = $pm;
+            }
+        } else {
+            $health_map[$did] = ['cpu' => [], 'mem' => [], 'storage' => [], 'other' => []];
+        }
         continue;
     }
 
@@ -1277,7 +1308,7 @@ if (empty($videoFile)) $videoFile = !empty($_SESSION['user_bgsite_video']) ? $_S
                 <?php
                 // Ping-only devices have no interfaces — give them a direct button to
                 // the real-time ICMP monitor instead of the (empty) interface views.
-                $_isPingCard = in_array(($NM_NODES[$id]['monitor_type'] ?? ''), ['ping','agent'], true) || ($def['os_icon'] === 'ping');
+                $_isPingCard = in_array(($NM_NODES[$id]['monitor_type'] ?? ''), ['ping'], true) || ($def['os_icon'] === 'ping');   // agent nodes now render full metric cards (bridged)
                 $_pingNodeId = (int)($NM_NODES[$id]['id'] ?? 0);
                 if ($_isPingCard && $_pingNodeId): ?>
                 <a href="live_ping.php?node=<?= $_pingNodeId ?>" onclick="event.stopPropagation();"
@@ -1820,7 +1851,12 @@ if (empty($videoFile)) $videoFile = !empty($_SESSION['user_bgsite_video']) ? $_S
                     <!-- Tab: Graphs (Chart.js from DB) ──────────────────────── -->
                     <?php
                     $node_id_g   = (int)($NM_NODES[$id]['id'] ?? 0);
-                    $_isPingG    = in_array(($NM_NODES[$id]['monitor_type'] ?? 'snmp'), ['ping','agent'], true);
+                    // Agent nodes now bridge interface traffic (nm_port_stats) + CPU/Mem/Storage
+                    // (nm_device_stats), so their Graphs tab shows the SAME rich view as an SNMP/Alloy
+                    // node (Interface Traffic + Device Health), NOT the ICMP latency view. Only true
+                    // 'ping' nodes (no telemetry) get the latency/availability chart. (Mirrors the
+                    // card gate at line ~1311 and net_mon_stats.php isPingNode — keep all three aligned.)
+                    $_isPingG    = in_array(($NM_NODES[$id]['monitor_type'] ?? 'snmp'), ['ping'], true);
                     $dev_ifaces  = array_values(array_filter($NM_IFACES[$id] ?? [], fn($i) => (int)$i['show_graph'] === 1));
                     $ports_json  = htmlspecialchars(json_encode(array_map(
                         fn($i) => ['pid'=>(int)$i['id'], 'name'=>$i['display_name']?:$i['if_name']?:"Port {$i['id']}"],

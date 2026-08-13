@@ -210,6 +210,34 @@ if (!function_exists('nm_agent_ensure')) {
     }
 
     // ── Store a telemetry batch: health JSON (nm_lx_health) + heartbeat (nm_ping_stats) ──
+    // Bridge the agent's per-interface traffic (net_ifaces: KB/s rx/tx) into nm_port_stats — the SAME
+    // table SNMP + Grafana Alloy write to — so agent nodes show INTERFACE TRAFFIC uniformly (net_mon_stats,
+    // traffic viewer, cards). AGENT-ONLY: SSH/Alloy nodes already have their own port_stats writer, so this
+    // is NEVER called for them (no double-write). Reuses the existing nm_interfaces port_id when the name
+    // already exists (e.g. enp0s31f6 → its port). in_rate/out_rate are BYTES/s → rx(KB/s)×1024. Best-effort.
+    function nm_agent_bridge_ifaces($conn, int $node_id, array $h): void {
+        if ($node_id <= 0 || empty($h['net_ifaces']) || !is_array($h['net_ifaces'])) return;
+        try {
+            $now = gmdate('Y-m-d H:i:s');
+            $sel = $conn->prepare("SELECT id FROM nm_interfaces WHERE node_id=? AND if_name=? LIMIT 1");
+            $ins = $conn->prepare("INSERT INTO nm_interfaces (node_id, if_name, display_name, show_graph) VALUES (?,?,?,1)");
+            $ps  = $conn->prepare("INSERT INTO nm_port_stats (node_id, port_id, recorded_at, in_rate, out_rate, oper_status) VALUES (?,?,?,?,?,'up')");
+            if (!$sel || !$ps) return;
+            foreach ($h['net_ifaces'] as $if) {
+                if (!is_array($if) || empty($if['name'])) continue;
+                $name = substr((string)$if['name'], 0, 190);
+                $inB  = (float)($if['rx'] ?? 0) * 1024.0;   // agent KB/s → nm_port_stats bytes/s
+                $outB = (float)($if['tx'] ?? 0) * 1024.0;
+                $sel->bind_param('is', $node_id, $name); $sel->execute(); $row = $sel->get_result()->fetch_row();
+                if ($row) { $pid = (int)$row[0]; }
+                elseif ($ins) { $ins->bind_param('iss', $node_id, $name, $name); try { $ins->execute(); } catch (\Throwable $e) { continue; } $pid = (int)$ins->insert_id; }
+                else { continue; }
+                if ($pid <= 0) continue;
+                $ps->bind_param('iisdd', $node_id, $pid, $now, $inB, $outB); $ps->execute();
+            }
+            $sel->close(); if ($ins) $ins->close(); $ps->close();
+        } catch (\Throwable $e) {}
+    }
     function nm_agent_ingest($conn, int $host_id, int $node_id, array $health, array $containers = []): array {
         if (function_exists('nm_lx_ensure')) nm_lx_ensure($conn);
         // Respect the operator's choice: if this card is NOT set to 'agent' (they switched it to SSH/
@@ -249,6 +277,10 @@ if (!function_exists('nm_agent_ensure')) {
                 $st->bind_param('isd', $node_id, $now, $lat); $st->execute(); $st->close();
             } catch (\Throwable $e) {}
         }
+        // uniform metrics: bridge the agent health into nm_device_stats so agent nodes show CPU / Memory /
+        // storage / uptime EVERYWHERE (server cards, dashboard, stats) — the same table SNMP writes to.
+        if ($node_id > 0 && function_exists('nm_lx_bridge_device_stats')) nm_lx_bridge_device_stats($conn, $node_id, $health);
+        if ($node_id > 0) nm_agent_bridge_ifaces($conn, $node_id, $health);   // interface traffic → nm_port_stats
         return ['ok'=>true, 'stored'=>true];
     }
 

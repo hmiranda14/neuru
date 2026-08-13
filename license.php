@@ -169,7 +169,15 @@ label{display:block;font-size:10.5px;text-transform:uppercase;letter-spacing:.4p
 const IS_ADMIN=<?= $isAdmin?'true':'false' ?>;
 const E=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 function tierColor(t){return t==='enterprise'?'#36e3d0':t==='pro'?'#4da3ff':t==='unlicensed'?'#f0a92c':'#9fb2c8';}
-function fmtDate(d){ if(!d)return '—'; return String(d).replace('T',' ').slice(0,16); }
+// Timestamps are stored UTC (canonical). Render them in the admin's configured display timezone
+// (window.nmLocal / NM_TZ from nm_tz_js). Only convert values that CARRY A TIME — a bare date
+// (license expiry, next-payment date) must NOT be shifted a day by a tz offset, so it stays as-is.
+function fmtDate(d){
+  if(!d) return '—';
+  var s = String(d);
+  if(window.nmLocal && /\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}/.test(s)) return window.nmLocal(s);
+  return s.replace('T',' ').slice(0,16);
+}
 async function load(){
   const r=await fetch('license.php?api=status&_='+Date.now()).then(x=>x.json()).catch(()=>null);
   if(!r||!r.ok)return;

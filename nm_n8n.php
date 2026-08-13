@@ -225,15 +225,19 @@ if (!function_exists('nm_n8n_get')) {
         $targets = nm_n8n_flow_targets();
         $want = array_flip(array_map('strval', $slugs));
 
-        $applied = 0; $routed = 0; $managedNow = [];
+        $applied = 0; $routed = 0; $managedNow = []; $schedMap = [];
         $tset = $conn->prepare("INSERT INTO nm_settings(setting_key,setting_val) VALUES(?,?) ON DUPLICATE KEY UPDATE setting_val=VALUES(setting_val)");
         if ($up = $conn->prepare("INSERT INTO nm_n8n_webhooks (name,slug,url,method,description,enabled,source)
                 VALUES (?,?,?,?,?,?, 'portal')
                 ON DUPLICATE KEY UPDATE name=VALUES(name), url=VALUES(url), method=VALUES(method),
                 description=VALUES(description), enabled=VALUES(enabled), source='portal'")) {
             foreach ((is_array($j['flows'] ?? null) ? $j['flows'] : []) as $f) {
-                $slug = trim((string)($f['slug'] ?? '')); if ($slug === '' || !isset($want[$slug])) continue;
+                // Register a flow if the customer selected it OR it's a SYSTEM flow (Portal-flagged
+                // background flows like anomaly-learn/detect that feed AI Insights) — those must land on
+                // EVERY install, free, regardless of the picker/bundle, so the feature is universal.
+                $slug = trim((string)($f['slug'] ?? '')); if ($slug === '' || (!isset($want[$slug]) && empty($f['system']))) continue;
                 $url  = (string)($f['url'] ?? '');        if ($url  === '') continue;
+                if (((int)($f['schedule_minutes'] ?? 0)) > 0) $schedMap[$slug] = (int)$f['schedule_minutes'];   // owner-set cadence → cron_flows.php fires it
                 $name = (string)($f['name'] ?? $slug);
                 $method = (strtoupper((string)($f['method'] ?? 'POST')) === 'GET') ? 'GET' : 'POST';
                 $desc = (string)($f['description'] ?? '');
@@ -284,6 +288,7 @@ if (!function_exists('nm_n8n_get')) {
 
         // remember the selection so the scheduled sync refreshes EXACTLY these (never spreads the rest)
         _nm_set_put($conn, 'flows_selected', json_encode(array_values(array_map('strval', $slugs))));
+        _nm_set_put($conn, 'flow_schedule', json_encode($schedMap));   // {slug:minutes} for cron_flows.php (owner-set in the VIP)
         $sum = json_encode(['applied' => $applied, 'routed' => $routed, 'gateway' => $gwApplied,
             'disabled' => $disabled, 'selected' => count($slugs), 'at' => date('c'),
             'plan' => (string)($j['subscription']['plan'] ?? ''), 'status' => (string)($j['subscription']['status'] ?? '')]);

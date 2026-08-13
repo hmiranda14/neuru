@@ -101,7 +101,21 @@ if ($api === 'sample') {
     foreach ($cur as $pidS=>$c) {
         $pid = (int)$pidS;
         if (empty($c['ok'])) { $rt[$pid]=['ok'=>0]; continue; }
-        $p = $prev[$pid] ?? null; $dt = $p ? ($now - (float)$p['ts']) : 0;
+        $p = $prev[$pid] ?? null;
+        // ── Counter-cache aliasing guard (kills the realtime "flip to 0") ───────────────
+        // Many snmpd builds cache IF-MIB octet counters for a few seconds. Polling faster than
+        // that cache (we sample ~1.5s) returns the IDENTICAL counter on the in-between reads →
+        // a naïve delta is 0 → the rate flapped 0 / real / 0 / real every poll (worst on
+        // low-traffic ifaces whose counters advance slowly). FIX: when the octet counters are
+        // unchanged from our stored baseline, HOLD — do NOT advance the baseline and report no
+        // new rate (omit in/out; the client keeps the last value). The next read where the
+        // counter actually moves then spans the FULL elapsed time → a correct AVERAGE rate,
+        // with no zero dips and no doubled spikes.
+        if ($p && (float)$c['in']==(float)$p['in_oct'] && (float)$c['out']==(float)$p['out_oct']) {
+            $rt[$pid] = ['ok'=>1, 'dt'=>round($now-(float)$p['ts'],2), 'hold'=>1];
+            continue;   // keep the previous baseline (counters + ts) so dt accumulates
+        }
+        $dt = $p ? ($now - (float)$p['ts']) : 0;
         $rate = function($n,$o) use($dt){ if($dt<=0.15||$dt>30) return null; $d=(float)$n-(float)$o; return $d>=0 ? $d/$dt : null; }; // null on wrap/first
         $row = ['ok'=>1, 'dt'=>round($dt,2)];
         if ($p) {
@@ -378,6 +392,7 @@ async function tvSample(){
     if(r&&r.ok){
       let got=0;
       Object.entries(r.rt||{}).forEach(([pid,v])=>{ const d=DATA.get(+pid); if(!d||!v.ok) return;
+        if(v.hold){ d.rt=true; DATA.set(+pid,d); return; }   // cached snmpd counter → keep last values, no flip to 0
         if(v.in!=null){ d.in=v.in; d.out=v.out; got++;
           d.hist=(d.hist||[]).concat([[v.in,v.out]]).slice(-40);
           d.peakIn=Math.max(d.peakIn||0,v.in); d.peakOut=Math.max(d.peakOut||0,v.out);

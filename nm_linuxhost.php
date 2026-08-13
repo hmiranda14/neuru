@@ -210,6 +210,32 @@ if (!function_exists('nm_lx_ensure')) {
             }
         } return $d;
     }
+    // Bridge Linux-Monitor / agent health (the nm_lx_health JSON) into nm_device_stats — the SAME
+    // time-series table SNMP writes — so agent- AND SSH-monitored nodes show CPU / Memory / storage /
+    // uptime UNIFORMLY everywhere (server cards, dashboard, stats charts), exactly like SNMP nodes.
+    // Best-effort: any failure is swallowed so it can never break health ingest. Additive only.
+    function nm_lx_bridge_device_stats($conn, int $node_id, array $h): void {
+        if ($node_id <= 0) return;
+        try {
+            $now = gmdate('Y-m-d H:i:s'); $rows = [];
+            if (isset($h['cpu']) && is_numeric($h['cpu'])) $rows[] = ['cpu','CPU',(float)$h['cpu'],0];
+            $memPct = null;
+            if (isset($h['mem_pct']) && is_numeric($h['mem_pct'])) $memPct = (float)$h['mem_pct'];
+            elseif (!empty($h['mem_total']) && isset($h['mem_used'])) $memPct = round(100*(float)$h['mem_used']/max(1,(float)$h['mem_total']),1);
+            if ($memPct !== null) $rows[] = ['memory','Physical Memory',$memPct, isset($h['mem_used'])?(int)$h['mem_used']:0];
+            if (!empty($h['disks']) && is_array($h['disks'])) foreach ($h['disks'] as $dk) {
+                if (is_array($dk) && isset($dk['pct']) && is_numeric($dk['pct']))
+                    $rows[] = ['storage', substr('Disk '.((string)($dk['id'] ?? '/')),0,190), (float)$dk['pct'], 0];
+            }
+            if (isset($h['uptime_sec']) && is_numeric($h['uptime_sec'])) $rows[] = ['uptime','Uptime',(float)$h['uptime_sec'],(int)$h['uptime_sec']];
+            if (!$rows) return;
+            $st = $conn->prepare("INSERT INTO nm_device_stats (node_id,recorded_at,metric_type,metric_key,value,raw_value) VALUES (?,?,?,?,?,?)");
+            if (!$st) return;
+            foreach ($rows as $r) { $mt=$r[0]; $mk=$r[1]; $val=(float)$r[2]; $raw=(int)$r[3];
+                $st->bind_param('isssdi', $node_id, $now, $mt, $mk, $val, $raw); $st->execute(); }
+            $st->close();
+        } catch (\Throwable $e) {}
+    }
     function nm_lx_poll_health($conn, array $h): array {
         nm_lx_ensure($conn); $hid=(int)$h['id']; $ssh=nm_lx_resolve_ssh($conn,$h);
         if(!$ssh||empty($ssh['username'])){ _nm_lx_err($conn,$hid,'No SSH credential resolved'); return['ok'=>false,'error'=>'no ssh']; }
@@ -218,6 +244,9 @@ if (!function_exists('nm_lx_ensure')) {
         $data=_nm_lx_parse_kv((string)$res['config']); if(empty($data['os'])&&empty($data['mem_total'])){ _nm_lx_err($conn,$hid,'health: no data'); return['ok'=>false,'error'=>'no data']; }
         $now=gmdate('Y-m-d H:i:s'); $je=$conn->real_escape_string(json_encode($data));
         $conn->query("INSERT INTO nm_lx_health (host_id,data,sampled_at) VALUES ($hid,'$je','$now') ON DUPLICATE KEY UPDATE data=VALUES(data),sampled_at=VALUES(sampled_at)");
+        // NOTE: the nm_device_stats bridge is intentionally NOT called here — SSH-monitored nodes get their
+        // CPU/Mem/traffic from SNMP or Grafana Alloy already; bridging here would DOUBLE-write. Only the
+        // neuru-agent (nm_agent_ingest) bridges, because the agent has no other writer.
         if(!empty($data['os']))$conn->query("UPDATE nm_lx_hosts SET os_caption='".$conn->real_escape_string(substr((string)$data['os'],0,160))."', last_health_poll='$now', status='ok', last_error=NULL WHERE id=$hid");
         else $conn->query("UPDATE nm_lx_hosts SET last_health_poll='$now' WHERE id=$hid");
         return['ok'=>true,'sections'=>array_keys($data)];

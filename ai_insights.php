@@ -183,6 +183,7 @@ if ($api !== '') {
             $nid = (int)$ins['node_id']; $ck = $conn->real_escape_string($healCk);
             $conn->query("REPLACE INTO nm_ai_heal_link (node_id,correlation_key,source_id,requested_at) VALUES ({$nid},'{$ck}',{$id},NOW())");
         }
+        $__bk=[]; try { require_once __DIR__.'/nm_solutionkb.php'; if (function_exists('nm_kb_search_books')) $__bk=nm_kb_search_books($conn, trim(((string)$ins['title']).' '.((string)$ins['body']))); } catch (\Throwable $e) {}
         [$code,$resp,$err] = nm_n8n_call($conn, 'self-heal', [
             'event'   => 'self_heal_propose',
             'insight' => [
@@ -191,6 +192,8 @@ if ($api !== '') {
                 'correlation_key'=>$healCk,   // an updated flow can echo this back; the portal also links it defensively
                 'data'=>$ins['data'] ? json_decode($ins['data'], true) : null,
             ],
+            'docs'      => $__bk,
+            'docs_text' => (function_exists('nm_kb_docs_context')?nm_kb_docs_context($__bk):''),
         ]);
         $replySnip = is_string($resp) ? mb_substr($resp,0,400) : mb_substr((string)json_encode($resp),0,400);
         if ($err) { echo json_encode(['ok'=>false,'err'=>$err,'http'=>$code,'reply'=>$replySnip,

@@ -1962,11 +1962,89 @@ input:checked+.toggle-slider::before{transform:translateX(20px);}
     <button class="tab-btn <?= $tab==='databases'?'active':'' ?>" onclick="showTab('databases');loadDbs()">
         <i class="fas fa-database"></i> Databases
     </button>
+    <button class="tab-btn <?= $tab==='jobs'?'active':'' ?>" onclick="showTab('jobs');loadJobs()">
+        <i class="fas fa-clock"></i> Scheduled Jobs
+    </button>
 </div>
 
 <!-- ══════════════════════════════════════════════════════════════════════ -->
 <!-- TAB 1: Settings                                                         -->
 <!-- ══════════════════════════════════════════════════════════════════════ -->
+<div id="tab-jobs" class="tab-panel <?= $tab==='jobs'?'active':'' ?>">
+  <div style="max-width:1000px;margin:0 auto;">
+    <h3 style="margin:2px 0 6px;font-size:15px;color:var(--accent);display:flex;align-items:center;gap:8px;"><i class="fas fa-clock"></i> Scheduled Jobs</h3>
+    <p style="color:#9aa3ad;font-size:12.5px;margin:0 0 12px;line-height:1.55;">Every background job in one place. Pick how often each one runs &mdash; or turn it off. <b style="color:#e0b24a;">&#9733; jobs charge AI/flow cost</b>, so slow those down to cut the bill. Changes apply on the next run &mdash; no restart. <span style="color:#8b95a1;">On-demand AI (Copilot, Solution Commander) is NOT scheduled &mdash; it only runs when you use it, so it is not listed here.</span></p>
+    <div id="jobs-summary" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px;"></div>
+    <div id="jobs-msg" style="min-height:16px;margin-bottom:8px;"></div>
+    <div id="jobs-groups"><div style="color:#777;padding:16px;">Loading&hellip;</div></div>
+  </div>
+  <script>
+  (function(){
+    var GROUPS=[
+      ['ai','&#9733; AI cost &mdash; these spend money','fa-brain','#e0b24a',true],
+      ['core','Core monitoring','fa-heart-pulse','#4da3ff',false],
+      ['monitor','Devices &amp; infrastructure','fa-server','#6fb3ff',false],
+      ['healing','Healing &amp; security','fa-shield-heart','#16c79a',false],
+      ['maint','Maintenance','fa-broom','#9aa3ad',false],
+      ['notify','Notifications','fa-bell','#c58bff',false]
+    ];
+    var IVP=[[0,'Default (every tick)'],[5,'at most every 5 min'],[15,'every 15 min'],[30,'every 30 min'],[60,'every 1 hour'],[120,'every 2 hours'],[360,'every 6 hours'],[720,'every 12 hours'],[1440,'once a day']];
+    function chip(txt,c){ return '<span style="background:'+c+'1e;color:'+c+';padding:4px 12px;border-radius:20px;font-size:12px;font-weight:700;">'+txt+'</span>'; }
+    function ivSelect(j){
+      var opts='';
+      if(j.kind==='interval'){
+        var found=false;
+        IVP.forEach(function(o){ var sel=(j.enabled && j.interval_min===o[0])?' selected':''; if(sel)found=true; opts+='<option value="'+o[0]+'"'+sel+'>'+o[1]+'</option>'; });
+        if(j.enabled && !found) opts+='<option value="'+j.interval_min+'" selected>every '+j.interval_min+' min</option>';
+        opts+='<option value="-1"'+(j.enabled?'':' selected')+'>&mdash; Off &mdash;</option>';
+      } else {
+        opts='<option value="0"'+(j.enabled?' selected':'')+'>On &middot; '+j.tick+'</option><option value="-1"'+(j.enabled?'':' selected')+'>&mdash; Off &mdash;</option>';
+      }
+      return '<select class="form-select" style="min-width:180px;padding:5px 9px;font-size:12.5px;" onchange="setJob(this)">'+opts+'</select>';
+    }
+    window.setJob=async function(el){
+      var tr=el.closest('tr'); var job=tr.getAttribute('data-job'); var v=parseInt(el.value);
+      var enabled=(v!==-1)?1:0; var iv=(v>0)?v:0; tr.style.opacity=enabled?'1':'.55';
+      var m=document.getElementById('jobs-msg');
+      try{
+        var r=await fetch('nm_jobs_api.php?api=save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({job:job,enabled:enabled,interval_min:iv})}).then(function(x){return x.json();});
+        m.innerHTML=r.ok?'<span style="color:#16c79a;font-size:12px;"><i class="fas fa-check"></i> '+job+' saved</span>':'<span style="color:#e07a68;font-size:12px;">save failed</span>';
+        setTimeout(function(){m.innerHTML='';},2500);
+      }catch(e){ m.innerHTML='<span style="color:#e07a68;font-size:12px;">save failed</span>'; }
+    };
+    window.loadJobs=async function(){
+      var box=document.getElementById('jobs-groups'); if(!box) return;
+      var r; try{ r=await fetch('nm_jobs_api.php?api=list').then(function(x){return x.json();}); }catch(e){ box.innerHTML='<div style="color:#e07a68;padding:16px;">load failed</div>'; return; }
+      if(!r.ok){ box.innerHTML='<div style="color:#e07a68;padding:16px;">'+(r.error||'error')+'</div>'; return; }
+      var J=r.jobs;
+      var total=J.length, ai=J.filter(function(j){return j.ai;}).length, off=J.filter(function(j){return !j.enabled;}).length, thr=J.filter(function(j){return j.enabled && j.interval_min>0;}).length;
+      document.getElementById('jobs-summary').innerHTML=chip(total+' jobs','#4da3ff')+chip(ai+' &#9733; AI cost','#e0b24a')+chip(thr+' throttled','#16c79a')+chip(off+' off','#e07a68');
+      var html='';
+      GROUPS.forEach(function(g){
+        var jobs=J.filter(function(j){return j.cat===g[0];}); if(!jobs.length) return;
+        var rows=jobs.map(function(j){
+          var star=j.ai?' <span style="color:#e0b24a;" title="charges AI/flow cost">&#9733;</span>':'';
+          var dep=j.dep?' <span style="color:#e07a68;font-size:9.5px;font-weight:800;letter-spacing:.5px;border:1px solid #e07a6855;padding:0 5px;border-radius:6px;">DEPRECATED</span>':'';
+          var last=j.last_run?String(j.last_run).slice(0,16):'&mdash;';
+          var flowln=j.flows?'<div style="color:#e0b24a;font-size:10.5px;margin-top:3px;"><i class="fas fa-diagram-project" style="font-size:9px;opacity:.85;"></i> flow: '+j.flows+'</div>':'';
+          return '<tr data-job="'+j.job+'"'+(j.enabled?'':' style="opacity:.55;"')+' style="border-top:1px solid #1a1f28;">'
+            +'<td style="padding:8px 12px;"><b style="color:#dfe4ea;">'+j.label+'</b>'+star+dep+'<div style="color:#727b86;font-size:11px;line-height:1.4;">'+j.desc+'</div>'+flowln+'</td>'
+            +'<td style="padding:8px;">'+ivSelect(j)+'</td>'
+            +'<td style="padding:8px;color:#8b95a1;font-size:11.5px;white-space:nowrap;">'+last+'</td></tr>';
+        }).join('');
+        html+='<details class="glass-card" style="margin-bottom:12px;padding:0;overflow:hidden;"'+(g[4]?' open':'')+'>'
+          +'<summary style="cursor:pointer;padding:12px 15px;font-size:13.5px;font-weight:700;color:'+g[3]+';display:flex;align-items:center;gap:9px;">'
+          +'<i class="fas '+g[2]+'"></i> '+g[1]+' <span style="color:#8b95a1;font-weight:400;font-size:12px;">'+jobs.length+'</span></summary>'
+          +'<div style="overflow-x:auto;border-top:1px solid #1a1f28;"><table style="width:100%;border-collapse:collapse;font-size:13px;"><tbody>'+rows+'</tbody></table></div>'
+          +'</details>';
+      });
+      box.innerHTML=html;
+    };
+    if(document.getElementById('tab-jobs') && document.getElementById('tab-jobs').classList.contains('active')) loadJobs();
+  })();
+  </script>
+</div>
+
 <div id="tab-settings" class="tab-panel <?= $tab==='settings'?'active':'' ?>">
 <div class="two-col">
 
@@ -2934,7 +3012,8 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock:ro   # optional: container stats
 </textarea>
         </div>
-        <div style="font-size:11px;color:#667;margin-top:6px;">Paste into <code>docker-compose.yml</code> on the target box and run <code>docker compose up -d</code>. The agent self-registers within ~30s.</div>
+        <div style="font-size:11px;color:#667;margin-top:6px;">Paste into <code>docker-compose.yml</code> on the target box and run <code>docker compose up -d</code>. The agent self-registers within ~30s. Runs on <b>x86-64 and ARM64 / Raspberry Pi</b> (multi-arch image).</div>
+        <div style="font-size:11px;color:#c9a15a;margin-top:5px;background:rgba(201,161,90,.07);border:1px solid rgba(201,161,90,.18);border-radius:6px;padding:7px 10px;"><i class="fas fa-microchip"></i> <b>Raspberry Pi / ARM stuck on <code>restarting</code>?</b> If <code>docker logs neuru-agent</code> shows <code>exec format error</code>, the published image is missing the ARM build. Fix: re-run the multi-arch publish workflow (<code>.github/workflows/neuru-agent.yml</code> &rarr; Actions &rarr; Run workflow), then on the Pi <code>docker compose pull &amp;&amp; docker compose up -d</code>. Interim: build it locally on the Pi &mdash; <code>docker build -t ghcr.io/hmiranda14/neuru-agent:latest .</code> inside <code>scripts/neuru-agent/</code>.</div>
       </div>
     </div>
 
@@ -5776,7 +5855,7 @@ async function clearAllCandidates() {
 }
 
 <?php if ($tab === 'discovery'): ?>
-document.addEventListener('DOMContentLoaded', loadCandidates);
+if (document.getElementById('candidates-content')) { if (document.readyState !== 'loading') loadCandidates(); else document.addEventListener('DOMContentLoaded', loadCandidates); }
 <?php endif ?>
 
 // ── Helpers ───────────────────────────────────────────────────────────────────

@@ -98,6 +98,7 @@ $user = $_SESSION['username'] ?? '';
         ['containers',   'fa-brands fa-docker',           'Containers'],
         ['switches',     'fa-solid fa-network-wired',     'Unmanaged Switches'],
         ['settings',     'fa-solid fa-gear',              'Global Settings'],
+        ['jobs',         'fa-solid fa-clock',             'Scheduled Jobs'],
     ];
     $items = $_nm_groups['Site Configuration']['items'] ?? [];
     $i = 0;

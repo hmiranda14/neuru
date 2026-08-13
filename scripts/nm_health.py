@@ -179,6 +179,10 @@ def collect_node(cur, node, now_dt, now_s):
 
 def run_once():
     db = get_db(); cur = db.cursor()
+
+    from nm_job_gate import should_run
+    if not should_run(cur, db, 'nm_health'):
+        cur.close(); db.close(); return
     ensure(cur); db.commit()
     cur.execute("""SELECT id, COALESCE(ip_address,''), COALESCE(snmp_community,''),
                           COALESCE(snmp_version,'v2c'), COALESCE(os_icon,'')

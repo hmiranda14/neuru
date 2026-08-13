@@ -15,6 +15,23 @@ if (!function_exists('nm_copilot_kb')) {
 // One-line "what it does + how to use it" per gated page, keyed by perm key.
 function nm_copilot_pagehelp(): array {
     return [
+        'jobs'            => 'Scheduled Jobs (net_mon_config.php?tab=jobs, Config > Scheduled Jobs, OR the Site Configuration Center > Scheduled Jobs card) - ONE place to see and tune the frequency + on/off of every background cron job (39 of them). Set a per-job Interval in minutes to run it less often (0 = default crontab tick), or disable it. Star-marked jobs charge AI/flow cost - throttle those (biosphere/anomaly/decoy/aiopilot/autopilot-v2/archaeology/etc.) to cut the AI bill. Changes apply on the next tick, no restart. It is NOT in Thresholds & Sensitivity (that page is alert sensitivity, not schedules).',
+        'traffic_view'    => 'Realtime Traffic Viewer (traffic_viewer.php, Menu > Command Centers > Realtime Traffic) - a WebGL command center with one animated laser per interface showing LIVE throughput (bits/s in/out) across monitored links; poll-driven, updates continuously. Watch traffic in real time and spot spikes/saturation at a glance.',
+        'monitoring_center' => 'Monitoring Center (monitoring_center.php, Menu > Monitoring > Monitoring Center) - the hub landing page that gathers every Monitoring, AI Tools and Ext-Monitoring tool as cards in one place; open it and pick the tool you need.',
+        'cisco'           => 'Cisco Fleet (cisco.php, Menu > Monitoring > Cisco Fleet) - the Cisco monitoring + orchestration suite: inventory and health of Cisco devices, with drill-downs to ASA firewalls, routers and switches, and an orchestrator for guarded config actions over SSH.',
+        'cisco_asa'       => 'Cisco ASA Firewall (cisco_asa.php, Menu > Monitoring > Cisco ASA Firewall) - monitor and manage Cisco ASA firewalls (interfaces, ACLs, VPN, connection/CPU/memory health) over SSH.',
+        'cisco_orch'      => 'Cisco Orchestrator (cisco_orch.php, Menu > Monitoring > Cisco Orchestrator) - preview and push configuration changes across the Cisco fleet with guarded, auditable SSH actions.',
+        'cisco_router'    => 'Cisco Routers (cisco_router.php, Menu > Monitoring > Cisco Routers) - per-router view for Cisco routers: interfaces, routing and live health over SSH.',
+        'cisco_switch'    => 'Cisco Switches (cisco_switch.php, Menu > Monitoring > Cisco Switches) - per-switch view for Cisco switches: ports, VLANs and live health over SSH.',
+        'l2switch'        => 'Unmanaged Switches (l2switch.php, Menu > Monitoring > Unmanaged Switches) - monitors TP-Link Easy Smart / unmanaged switches that have no SNMP, by scraping their web UI for per-port link and traffic.',
+        'nettools_netstat' => 'Netstat (netstat.php, Menu > Net Tools > Netstat) - pull the live socket/connection table (listening ports + active connections) from a selected node over SSH.',
+        'nettools_portscan' => 'Port Scanner (portscan.php, Menu > Net Tools > Port Scanner) - on-demand TCP connect scan of a target (async, pure-PHP, no nmap) to see which ports are open.',
+        'vault'           => 'Data Vault (vault.php, Menu > Site Configuration > Data Vault) - DB retention policies plus a Backup Vault: scheduled mysqldump backups shipped to S3 / WebDAV / the Portal, with restore.',
+        'config_backup'   => 'Save Configuration (config_backup.php, Menu > Site Configuration > Save Configuration) - export ALL of this install configuration to a single config.neuru file and restore it later (migration / disaster recovery).',
+        'stream_decks'    => 'Stream Decks (stream_decks.php, Menu > Site Configuration > Stream Decks) - bind a physical VSDinside/Elgato-style key pad as a NOC controller: map keys to NEURU actions/pages for one-press operations.',
+        'support'         => 'Support and Bugs (support.php, Menu > Site Configuration > Support and Bugs) - open and track support tickets / bug reports; they flow to the NEURU support hub on the Portal.',
+        'update'          => 'Updates (update.php, Menu > Site Configuration > Updates) - Self-Update: check for, download and apply Ed25519-signed release bundles from the Portal (with version history), no manual file copying.',
+        'site_config'     => 'Configuration Center (site_config.php, Menu > Site Configuration > Configuration Center) - the hub landing page for all site-configuration tools (Config, Thresholds, Access Control, Licensing, Data Vault, Notifications, Widgets, etc.); open it and pick a card.',
         'net_mon'         => 'Live operations Dashboard — counters, per-node traffic & health, AI Insights strip. Auto-refreshes every 5s (no reload).',
         'incidents'       => 'Incident Command — correlated incidents (signals grouped into one root incident). Acknowledge / resolve / ignore (mute) here. Click an incident for signals + root cause.',
         'net_mon_map'     => 'Network Map — topological node/link diagram with live status. Click a node to troubleshoot.',
@@ -106,10 +123,12 @@ function nm_copilot_menu_map(): array {
             ['Incidents',           'incidents'],
         ],
         'Menu ▸ Command Centers' => [
+            ['NEURUTIK','neurutik'],['NEURUTIK Matrix Flow','matrix_flow'],['Realtime Traffic Viewer','traffic_view'],
             ['NEURU Commander (flagship)','autopilotv2'],['Command Center','command'],['Map','net_mon_map'],['Geo Wall (new tab)','geomap'],
             ['Traffic Hologram','hologram'],['Router Command Center','router_center'],['Routing Command Center','routing_center'],['Remote Console','remote_console'],['DB Observatory','dbobs'],['Service Biosphere','biosphere'],
         ],
         'Menu ▸ Monitoring' => [
+            ['Monitoring Center','monitoring_center'],['Cisco Fleet','cisco'],['Cisco ASA Firewall','cisco_asa'],['Cisco Orchestrator','cisco_orch'],['Cisco Routers','cisco_router'],['Cisco Switches','cisco_switch'],
             ['Troubleshoot Wizard','troubleshoot'],['Live','live_mon'],['Stats','net_mon_stats'],
             ['NetFlow','netflow'],['Unmanaged Switches','l2switch'],['Shadow IT','shadowit'],
             ['Predictive Health','health'],['Windows Monitor','windows'],['Linux Monitor','linux'],['Service Watchdog','watchdog'],['Router Monitor','routers'],
@@ -150,6 +169,7 @@ function nm_copilot_menu_map(): array {
             ['Config Manager','config_mgr'],['Adv. Solution Commander','router_commander'],['WireGuard Orchestrator','wireguard'],['MikroTik Device Manager','mtfw'],['WiFi Control Center','wifi'],
         ],
         'Menu ▸ Site Configuration' => [
+            ['Configuration Center','site_config'],['Data Vault','vault'],['Save Configuration','config_backup'],['Stream Decks','stream_decks'],['Support and Bugs','support'],['Updates','update'],['About','about'],['Federation','federation'],
             ['IP Address Mgmt','ipam'],['SLA & Reports','reports'],['Config','net_mon_config'],['Thresholds & Sensitivity','thresholds'],
             ['Widget Studio','widgets'],['Widget Marketplace','widget_market'],['Widget SDK Guide','widget_sdk'],
             ['Notifications & Maintenance','notify_admin'],['Access Control','user_admin'],['Audit Log','audit_log'],['Licensing','license'],
