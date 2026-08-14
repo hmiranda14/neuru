@@ -1,0 +1,13 @@
+.git
+.github
+wg/
+*.bak*
+.nm_secret.key
+.nm_install_id
+connection.php
+connection-users.php
+updates/staging
+updates/backups
+backups/
+docs/
+licenseportal/

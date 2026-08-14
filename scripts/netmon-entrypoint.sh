@@ -183,6 +183,7 @@ if [ -f "$CRONF" ]; then
     ensure_cron cron_linuxhost.php "*/5 * * * *"
     ensure_cron cron_cisco.php     "*/5 * * * *"
     ensure_cron cron_notify.php    "*/5 * * * *"
+    ensure_cron cron_sentinel.php "*/3 * * * *"
     ensure_cron cron_container_logs.php "*/5 * * * *"
     ensure_cron cron_autopilotv2.php "* * * * *"
     ensure_cron cron_aip_telegram.php "* * * * *"
@@ -198,6 +199,9 @@ if [ -f "$CRONF" ]; then
     ensure_cron cron_vault.php      "0 * * * *"
     ensure_cron cron_update.php     "23 4 * * *"
     ensure_cron cron_license.php    "17 */6 * * *"
+    # Python pollers (invoked directly via the venv, NOT nm_cron.sh) that shipped later —
+    # self-heal them onto existing installs' persisted cron file too.
+    grep -q "nm_ipam_scan.py" "$CRONF" || echo "*/30 * * * * $VENV $APP/scripts/nm_ipam_scan.py >> $LOGS/nm_ipam_scan.log 2>&1" >> "$CRONF"
     crontab -u "$NEURU_USER" "$CRONF" && echo "[entrypoint] crontab installed for $NEURU_USER (runtime-token wrapper)"
 fi
 

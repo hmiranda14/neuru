@@ -96,6 +96,44 @@ function nm_ctr_seed($conn): void {
                     'fa-solid fa-satellite-dish','{}',?,?,'unless-stopped',1,'host','host')")) {
         $ag->bind_param('ss', $env, $vols); $ag->execute(); $ag->close();
     }
+
+    // ── NEURU Utilities — one-click rescue/provisioning stack ─────────────────
+    // Host networking (TFTP/NTP/DHCP/syslog need real ports). Shared file-store volume.
+    // Env (NEURU_URL/UTIL_TOKEN) auto-filled live in nm_ctr_templates() → just click Deploy.
+    $uvols = json_encode(['neuru_utils_store:/srv/neuru-utils']);
+    $uenv  = json_encode(['NEURU_URL=__AUTO__','UTIL_TOKEN=__AUTO__','POLL_SECONDS=20']);
+    if ($ut = $conn->prepare("INSERT IGNORE INTO nm_ctr_templates
+            (name,category,image,description,icon,ports_json,env_json,volumes_json,restart,is_builtin,pid_mode,network_mode)
+            VALUES ('NEURU Utilities','Provisioning','ghcr.io/hmiranda14/neuru-utilities:latest',
+                    'Rescue & provisioning stack — TFTP/SFTP/FTP/HTTP-firmware/NTP/iPerf3/syslog/File-Browser + PXE-ZTP, all configured from NEURU',
+                    'fa-solid fa-toolbox','{}',?,?,'unless-stopped',1,'','host')")) {
+        $ut->bind_param('ss', $uenv, $uvols); $ut->execute(); $ut->close();
+    }
+
+    // ── NEURU (full platform) — the whole stack in one container (all-in-one image) ──
+    // Deployable to a Docker host (Pi/Ubuntu) or a MikroTik x86 CHR. Embedded MariaDB +
+    // schema self-init on first boot. Federation env auto-filled so a deploy FROM this NEURU
+    // makes the new instance a slave by default (clear them in the modal for a standalone box).
+    $nports = json_encode(['80/tcp'=>'80','443/tcp'=>'443']);
+    $nvols  = json_encode(['neuru_db:/var/lib/mysql']);
+    $nenv   = json_encode(['TZ=America/Puerto_Rico','NEURU_ADMIN_PASS=admin@1.one','NEURU_MASTER_URL=__FED__','NEURU_MASTER_TOKEN=__FED__']);
+    if ($nb = $conn->prepare("INSERT IGNORE INTO nm_ctr_templates
+            (name,category,image,description,icon,ports_json,env_json,volumes_json,restart,is_builtin,pid_mode,network_mode)
+            VALUES ('NEURU (full platform)','NEURU','ghcr.io/hmiranda14/neuru-box:latest',
+                    'The WHOLE NEURU platform in one container (Apache+PHP+MariaDB+pollers) — deploy on Pi/Ubuntu or a MikroTik x86 CHR. First boot self-initializes the DB + schema.',
+                    'fa-solid fa-dragon',?,?,?,'unless-stopped',1,'','')")) {
+        $nb->bind_param('sss', $nports, $nenv, $nvols); $nb->execute(); $nb->close();
+    }
+
+    // ── NEURU Sentinel — wire threat sensor (host net + NET_RAW for capture) ──
+    $senv = json_encode(['NEURU_URL=__AUTO__','SENTINEL_TOKEN=__AUTO__','POLL_SECONDS=60']);
+    if ($se = $conn->prepare("INSERT IGNORE INTO nm_ctr_templates
+            (name,category,image,description,icon,ports_json,env_json,volumes_json,restart,is_builtin,pid_mode,network_mode)
+            VALUES ('NEURU Sentinel','Security','ghcr.io/hmiranda14/neuru-sentinel:latest',
+                    'Non-intrusive threat sensor — passive DNS + IP-reputation capture; reports to NEURU (blocking via Collective Immunity)',
+                    'fa-solid fa-shield-halved','{}',?,'[]','unless-stopped',1,'','host')")) {
+        $se->bind_param('s', $senv); $se->execute(); $se->close();
+    }
 }
 
 function nm_ctr_templates($conn): array {
@@ -112,9 +150,66 @@ function nm_ctr_templates($conn): array {
             $x['env'] = nm_ctr_agent_env($conn);
             $x['autofill'] = true;
         }
+        // NEURU Utilities: same — auto-fill the base URL + enrolment token.
+        if (($x['image'] ?? '') === 'ghcr.io/hmiranda14/neuru-utilities:latest') {
+            $x['env'] = nm_ctr_util_env($conn);
+            $x['autofill'] = true;
+        }
+        // NEURU Sentinel: auto-fill base URL + sentinel token.
+        if (($x['image'] ?? '') === 'ghcr.io/hmiranda14/neuru-sentinel:latest') {
+            $x['env'] = nm_ctr_sentinel_env($conn);
+            $x['autofill'] = true;
+        }
+        // NEURU (full platform): federate to THIS NEURU by default (clear the master env for standalone).
+        if (($x['image'] ?? '') === 'ghcr.io/hmiranda14/neuru-box:latest') {
+            $fed = nm_ctr_neuru_fed($conn);
+            $x['env'] = array_map(function($e) use($fed){
+                foreach ($fed as $k=>$v) if (strpos($e,$k.'=__FED__')===0) return $k.'='.$v;
+                return $e;
+            }, (array)($x['env'] ?? []));
+            $x['autofill'] = true;
+            $x['federates'] = true;   // hint the UI to show a "federate to this NEURU" note
+        }
         $out[] = $x;
     }
     return $out;
+}
+// Federation defaults for a NEURU-box deployed FROM this NEURU (master URL + enrol token).
+function nm_ctr_neuru_fed($conn): array {
+    $scheme = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
+    $host   = $_SERVER['HTTP_HOST'] ?? '';
+    $tok = '';
+    try { $r=$conn->query("SELECT setting_val FROM nm_settings WHERE setting_key='federation_enroll_token' LIMIT 1");
+        if ($r && ($v=$r->fetch_row())) $tok=(string)$v[0];
+        if ($tok===''){ $tok='neu_fed_'.bin2hex(random_bytes(20));
+            $st=$conn->prepare("INSERT INTO nm_settings(setting_key,setting_val) VALUES('federation_enroll_token',?) ON DUPLICATE KEY UPDATE setting_val=VALUES(setting_val)");
+            $st->bind_param('s',$tok); $st->execute(); $st->close(); }
+    } catch (\Throwable $e) {}
+    return ['NEURU_MASTER_URL'=>$host?($scheme.'://'.$host):'', 'NEURU_MASTER_TOKEN'=>$tok];
+}
+// Live env for the NEURU Sentinel template (base URL + sentinel enrolment token).
+function nm_ctr_sentinel_env($conn): array {
+    require_once __DIR__ . '/nm_sentinel.php';
+    require_once __DIR__ . '/nm_agent.php';   // reuse nm_agent_selfsigned_likely
+    $tok = nm_sentinel_token_ensure($conn);
+    $scheme = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
+    $host   = $_SERVER['HTTP_HOST'] ?? 'YOUR-NEURU-HOST';
+    $env = ['NEURU_URL=' . $scheme . '://' . $host, 'SENTINEL_TOKEN=' . $tok, 'POLL_SECONDS=60'];
+    if (function_exists('nm_agent_selfsigned_likely') && nm_agent_selfsigned_likely($scheme, $host)) $env[] = 'VERIFY_TLS=0';
+    return $env;
+}
+// Live env for the NEURU Utilities template (base URL from this request + the enrolment token).
+function nm_ctr_util_env($conn): array {
+    require_once __DIR__ . '/nm_utilities.php';
+    require_once __DIR__ . '/nm_agent.php';   // reuse nm_agent_selfsigned_likely
+    $tok = nm_util_token_ensure($conn);
+    $scheme = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
+    $host   = $_SERVER['HTTP_HOST'] ?? 'YOUR-NEURU-HOST';
+    $env = ['NEURU_URL=' . $scheme . '://' . $host,   // agent appends /utilities.php itself
+            'UTIL_TOKEN=' . $tok,
+            'POLL_SECONDS=20'];
+    if (function_exists('nm_agent_selfsigned_likely') && nm_agent_selfsigned_likely($scheme, $host)) $env[] = 'VERIFY_TLS=0';
+    return $env;
 }
 // Live env for the NEURU Agent template (endpoint from this request + the enrollment token).
 function nm_ctr_agent_env($conn): array {
@@ -210,6 +305,18 @@ function nm_ctr_deploy($conn, array $cfg, int $eid, array $in, ?int $uid=null): 
                 foreach ($spec['env'] as $e) { $k = strtok($e,'='); if ($k!==false) $keys[$k]=1; }
                 $auto = nm_ctr_agent_env($conn);
                 foreach ($auto as $ae) { $ak = strtok($ae,'='); if (empty($keys[$ak])) $spec['env'][] = $ae; }
+            }
+            if (($trow['image'] ?? '') === 'ghcr.io/hmiranda14/neuru-utilities:latest') {
+                // guarantee NEURU_URL/UTIL_TOKEN are present + correct
+                $keys = [];
+                foreach ($spec['env'] as $e) { $k = strtok($e,'='); if ($k!==false) $keys[$k]=1; }
+                foreach (nm_ctr_util_env($conn) as $ae) { $ak = strtok($ae,'='); if (empty($keys[$ak])) $spec['env'][] = $ae; }
+            }
+            if (($trow['image'] ?? '') === 'ghcr.io/hmiranda14/neuru-sentinel:latest') {
+                $spec['caps'] = ['NET_ADMIN','NET_RAW'];   // raw packet/DNS capture (scapy)
+                $keys = [];
+                foreach ($spec['env'] as $e) { $k = strtok($e,'='); if ($k!==false) $keys[$k]=1; }
+                foreach (nm_ctr_sentinel_env($conn) as $ae) { $ak = strtok($ae,'='); if (empty($keys[$ak])) $spec['env'][] = $ae; }
             }
         }
     }

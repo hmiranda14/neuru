@@ -12,4 +12,4 @@ services:
       SENTINEL_TOKEN: "PASTE-TOKEN"        # NEURU → Sentinel → Deploy
       # IFACE: "eth0"                      # optional: limit to one interface
       # VERIFY_TLS: "0"                    # if NEURU uses a self-signed cert
-      POLL_SECONDS: "300"
+      POLL_SECONDS: "60"

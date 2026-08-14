@@ -12,6 +12,7 @@ include('connection.php');
 require_once('access_control.php');
 require_once('nm_portainer.php');
 require_once('nm_ctr_templates.php');
+require_once('nm_router_ctr.php');   // MikroTik native /container deploy targets
 require_once('nm_chrome.php');
 include('logger.php');
 
@@ -149,7 +150,13 @@ if ($api !== '') {
     }
 
     // ── Container templates + one-click deploy ──
-    if ($api === 'endpoints') { echo json_encode(['ok'=>true,'endpoints'=>ctr_endpoints($cfg)]); exit; }
+    if ($api === 'endpoints') {
+        $eps = ctr_endpoints($cfg);
+        // Also offer MikroTik routers as native deploy targets (RouterOS /container over SSH).
+        // Encoded with a NEGATIVE id so the deploy handler routes them to the SSH path.
+        foreach (nm_rctr_targets($conn) as $t) $eps[] = ['id'=>-(int)$t['id'],'name'=>$t['display_name'].' — MikroTik','kind'=>'mikrotik','up'=>true];
+        echo json_encode(['ok'=>true,'endpoints'=>$eps]); exit;
+    }
     if ($api === 'templates') { echo json_encode(['ok'=>true,'templates'=>nm_ctr_templates($conn)]); exit; }
     if ($api === 'image_search') {
         $q = trim((string)($_GET['q'] ?? ''));
@@ -182,8 +189,35 @@ if ($api !== '') {
     if ($api === 'deploy') {
         if (($_SERVER['REQUEST_METHOD']??'GET')!=='POST') { echo json_encode(['ok'=>false,'error'=>'POST required']); exit; }
         $b = json_decode(file_get_contents('php://input'), true) ?? [];
-        $r = nm_ctr_deploy($conn, $cfg, (int)($b['endpoint'] ?? $eid), $b, (int)($_SESSION['UID'] ?? 0));
+        $target = (int)($b['endpoint'] ?? $eid);
+        if ($target < 0) {   // MikroTik router → native /container deploy over SSH
+            $spec = ['image'=>(string)($b['image'] ?? ''),'name'=>(string)($b['name'] ?? ''),
+                     'env'=>array_values((array)($b['env'] ?? [])),'storage'=>(string)($b['storage'] ?? '')];
+            $r = nm_rctr_deploy($conn, -$target, $spec, (int)($_SESSION['UID'] ?? 0));
+            echo json_encode(['ok'=>(bool)($r['ok']??false),'error'=>$r['error']??'','router'=>$r['router']??'','note'=>$r['note']??'','log'=>$r['log']??[]]); exit;
+        }
+        $r = nm_ctr_deploy($conn, $cfg, $target, $b, (int)($_SESSION['UID'] ?? 0));
         echo json_encode(['ok'=>(bool)($r['ok']??false),'error'=>$r['error']??'','status'=>$r['status']??0,'id'=>(($r['data']['Id']??'')) ]); exit;
+    }
+
+    if ($api === 'box_ready') {
+        // Live first-boot progress for a freshly-deployed NEURU-in-a-Box: server-side proxy to
+        // the new instance's /ready.php (browser can't cross-origin to it). LAN-only by design
+        // (SSRF guard: private/CGNAT hosts only) — this is an internal NOC tool.
+        $u = trim((string)($_GET['url'] ?? ''));
+        $p = @parse_url($u); $h = strtolower((string)($p['host'] ?? ''));
+        $priv = preg_match('/^(10\.|192\.168\.|127\.|172\.(1[6-9]|2\d|3[01])\.|100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.|169\.254\.)/', $h)
+             || filter_var($h, FILTER_VALIDATE_IP) === false; // allow private IPs + LAN hostnames
+        if ($h === '' || !$priv) { echo json_encode(['ok'=>false,'stage'=>'bad-target']); exit; }
+        $base = ($p['scheme'] ?? 'http').'://'.$h.(isset($p['port'])?(':'.$p['port']):'');
+        $ch = curl_init($base.'/ready.php');
+        curl_setopt_array($ch, [CURLOPT_RETURNTRANSFER=>true, CURLOPT_TIMEOUT=>5, CURLOPT_CONNECTTIMEOUT=>4,
+            CURLOPT_SSL_VERIFYPEER=>false, CURLOPT_SSL_VERIFYHOST=>0, CURLOPT_USERAGENT=>'NEURU']);
+        $resp = curl_exec($ch); $code = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE); curl_close($ch);
+        $j = $resp ? json_decode($resp, true) : null;
+        if (is_array($j)) { $j['http']=$code; echo json_encode($j); }
+        else echo json_encode(['ok'=>false,'stage'=>$code?('http-'.$code):'unreachable','http'=>$code]);
+        exit;
     }
 
     if ($api === 'action') {
@@ -1164,11 +1198,38 @@ async function doDeploy(){
   const dlog=document.getElementById('dlog'); const pull=document.getElementById('dl-pull');
   if(r.ok){ pull.innerHTML='<span class="sp">▸</span> image ready · container created · starting';
     dlog.innerHTML+=`<div class="ln ok"><i class="fas fa-circle-check"></i> Deployed &amp; started${s.name?(' as <b>'+esc(s.name)+'</b>'):''} ✓</div>`;
+    // NEURU-in-a-Box: first boot (DB init + schema import) takes ~1-2 min → live progress via ready.php
+    if(/neuru-box/.test(s.image)){
+      const guess=(String(r.router||'').match(/\d+\.\d+\.\d+\.\d+/)||[''])[0];
+      dlog.innerHTML+=`<div class="ln" style="margin-top:8px;color:#9aa;">This is a full NEURU instance — first boot initializes the database &amp; imports the schema (~1-2 min). Enter its address to watch it come up:</div>
+        <div class="ln" style="display:flex;gap:6px;align-items:center;margin-top:4px;">
+          <input id="box-url" value="${guess?('http://'+guess):'http://'}" style="flex:1;background:#0b0f14;border:1px solid #2a3340;color:#cfe;border-radius:6px;padding:6px 8px;font-size:12px;">
+          <button class="gobtn" onclick="boxWatch()"><i class="fas fa-satellite-dish"></i> Watch boot</button></div>
+        <div id="box-stage" style="margin-top:8px;"></div>`;
+    }
     document.getElementById('dpl-foot').innerHTML=`<button class="gobtn" style="margin-left:auto;" onclick="location.href='containers.php?view=overview&endpoint='+(DPL.host||ENDPOINT)"><i class="fas fa-arrow-right"></i> View containers</button>`;
+    if(/neuru-box/.test(s.image)){ setTimeout(boxWatch,1500); }
   } else { pull.innerHTML='<span class="sp">▸</span> attempted: pull · create · start';
     dlog.innerHTML+=`<div class="ln err"><i class="fas fa-circle-xmark"></i> ${esc(r.error||('failed (HTTP '+(r.status||'?')+')'))}</div>`;
     document.getElementById('dpl-foot').innerHTML=`<button class="ghost" onclick="configForm()"><i class="fas fa-arrow-left"></i> Back to config</button>`;
   }
+}
+let BOXW=null;
+function boxWatch(){
+  const el=document.getElementById('box-stage'), inp=document.getElementById('box-url');
+  if(!el||!inp) return; const url=inp.value.trim(); if(!/^https?:\/\/.+/.test(url)){ el.innerHTML='<span style="color:#f7a;">Enter the new NEURU\'s http(s) address</span>'; return; }
+  const steps=[['starting-database','Booting database'],['importing-schema','Importing schema (114 tables)'],['db-up','Database up'],['ready','NEURU is up']];
+  if(BOXW) clearInterval(BOXW);
+  const tick=async()=>{
+    const j=await fetch('containers.php?api=box_ready&url='+encodeURIComponent(url)+'&_='+Date.now()).then(r=>r.json()).catch(()=>({stage:'unreachable'}));
+    const st=j.stage||'starting'; const idx=steps.findIndex(x=>x[0]===st);
+    const rows=steps.map((x,i)=>{ const done=(st==='ready')||(idx>=0&&i<idx); const cur=(x[0]===st);
+      return `<div class="ln ${done?'ok':''}" style="opacity:${(done||cur)?1:.45};"><i class="fas ${done?'fa-circle-check':(cur?'fa-circle-notch fa-spin':'fa-circle')}"></i> ${x[1]}</div>`; }).join('');
+    el.innerHTML=rows + (j.ok?`<div class="ln ok" style="margin-top:6px;"><i class="fas fa-arrow-right"></i> <a href="${url}" target="_blank" style="color:#7ee787;">Open ${esc(url)}</a>${j.version?(' · v'+esc(j.version)):''}</div>`
+      : `<div class="ln" style="color:#7c828c;margin-top:6px;">${st==='unreachable'?'waiting for the container to answer…':('stage: '+esc(st))}</div>`);
+    if(j.ok){ clearInterval(BOXW); BOXW=null; }
+  };
+  tick(); BOXW=setInterval(tick,4000);
 }
 async function saveTpl(){
   const s=curSpec(); const nm=prompt('Save as template — name:', s.name||(DPL.tpl?(DPL.tpl.name+' (copy)'):'My template')); if(!nm) return;

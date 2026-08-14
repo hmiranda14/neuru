@@ -1,0 +1,20 @@
+# NEURU-in-a-Box — the whole platform in one container. Deploy on any Docker host
+# (Ubuntu/Pi) or a MikroTik x86 CHR. First boot initializes the DB + schema (~1-2 min).
+services:
+  neuru:
+    image: ghcr.io/hmiranda14/neuru-box:latest
+    container_name: neuru
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      TZ: "America/Puerto_Rico"
+      NEURU_ADMIN_PASS: "admin@1.one"      # first-boot admin password (change it!)
+      # Deployed FROM another NEURU? it fills these to federate as a slave (else standalone):
+      # NEURU_MASTER_URL: "https://parent-neuru"
+      # NEURU_MASTER_TOKEN: "..."
+    volumes:
+      - neuru_db:/var/lib/mysql             # database persists across restarts
+volumes:
+  neuru_db:

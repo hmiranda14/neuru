@@ -9,6 +9,7 @@ require_once __DIR__ . '/nm_secrets.php';
 require_once __DIR__ . '/nm_portainer.php';
 require_once __DIR__ . '/nm_geomap.php';   // node geo (coords) + GeoIP auto-locate
 require_once __DIR__ . '/nm_nodemeta.php'; // device classification + asset fields (model/serial/warranty/photo)
+require_once __DIR__ . '/nm_switches.php'; // device_role classification (switch/router/…) — poller-safe, separate from os_icon
 require_once __DIR__ . '/nm_media.php';    // secure image upload (equipment photos)
 require_once __DIR__ . '/nm_license.php';  // node-limit enforcement (best-effort; no-op unless enforced)
 require_once __DIR__ . '/nm_maintenance.php'; // per-node maintenance mode (Unmanage/Pause)
@@ -1270,6 +1271,7 @@ $conn->query("CREATE TABLE IF NOT EXISTS nm_oid_configs(
 $conn->query("INSERT IGNORE INTO nm_oid_templates(name,os_type,description,is_builtin) VALUES
     ('Generic / HOST-RESOURCES-MIB','generic','Universal standard MIBs. CPU via hrProcessorLoad, memory+disk via hrStorageTable. Works for MikroTik, Linux, Cisco and most SNMP devices.',1),
     ('MikroTik RouterOS','mikrotik','MikroTik enterprise OIDs for temperature, fan speed, and voltage sensors (mtxrHlTable). Combine with Generic for full metrics.',1),
+    ('MikroTik SwOS (switch)','swos','MikroTik SwOS switches (CSS / CRS running SwOS). Per-port link, speed & traffic come from IF-MIB automatically — no template OIDs needed. This template adds the mtxrHlTable temperature/voltage sensors present on switches that have them. SwOS does NOT expose HOST-RESOURCES, so there is no CPU/RAM/disk — that is normal for a switch.',1),
     ('Linux / NET-SNMP','linux','UCD-SNMP MIB OIDs for Linux servers running net-snmp (snmpd).',1),
     ('Cisco IOS / IOS-XE','cisco','Cisco enterprise OIDs for CPU utilization and memory pools.',1),
     ('Windows Server / HOST-RESOURCES-MIB','windows','For Windows (SNMP Service enabled). CPU, RAM% and per-volume disk are already auto-collected via HOST-RESOURCES-MIB; this template adds the Windows-specific extras: running processes, logged-in users, and total physical RAM.',1)
@@ -1284,6 +1286,19 @@ if ($_r && ($_tid_row = $_r->fetch_assoc())) {
             ({$_tid},'Board Temp','temperature','.1.3.6.1.4.1.14988.1.1.3.10.0','°C',0,0.1,'mtxrHlBoardTemperature (tenths of °C)',20),
             ({$_tid},'Fan Speed','custom','.1.3.6.1.4.1.14988.1.1.3.14.0','RPM',0,1.0,'mtxrHlActiveFan (RPM)',30),
             ({$_tid},'Voltage','custom','.1.3.6.1.4.1.14988.1.1.3.8.0','V',0,0.1,'mtxrHlVoltage (tenths of V)',40)
+        ");
+    }
+}
+// Seed MikroTik SwOS OIDs (mtxrHlTable temp/voltage; only populated on models with sensors — 0/absent
+// on small CSS units, real values on CRS switches). Port stats come from IF-MIB, so no per-port OIDs here.
+$_r = $conn->query("SELECT id FROM nm_oid_templates WHERE os_type='swos' AND is_builtin=1 LIMIT 1");
+if ($_r && ($_tid_row = $_r->fetch_assoc())) {
+    $_tid = (int)$_tid_row['id'];
+    if (!$conn->query("SELECT id FROM nm_oid_configs WHERE template_id={$_tid} LIMIT 1")->num_rows) {
+        $conn->query("INSERT IGNORE INTO nm_oid_configs(template_id,metric_name,metric_type,oid,unit,walk,scale,description,sort_order) VALUES
+            ({$_tid},'Board Temp','temperature','.1.3.6.1.4.1.14988.1.1.3.10.0','°C',0,0.1,'mtxrHlBoardTemperature (tenths of °C; 0 if no sensor)',10),
+            ({$_tid},'CPU Temp','temperature','.1.3.6.1.4.1.14988.1.1.3.11.0','°C',0,0.1,'mtxrHlCpuTemperature (tenths of °C; 0 if no sensor)',20),
+            ({$_tid},'PSU Voltage','custom','.1.3.6.1.4.1.14988.1.1.3.8.0','V',0,0.1,'mtxrHlVoltage (tenths of V)',30)
         ");
     }
 }
@@ -1484,6 +1499,9 @@ if ($_SERVER['REQUEST_METHOD']==='POST') {
                 $a['manufacturer'], $a['model'], $a['serial_number'], $a['asset_tag'], $a['purchase_date'], $a['warranty_expiry'], $a['asset_notes']);
             $st->execute();
             $newId = (int)$conn->insert_id;
+            // Device Role classification (poller-safe; isolated from os_icon)
+            if ($newId && isset($_POST['device_role']) && function_exists('nm_sw_set_role'))
+                nm_sw_set_role($conn, $newId, (string)$_POST['device_role'] === '' ? 'auto' : (string)$_POST['device_role']);
             // equipment photo (optional)
             if ($newId && !empty($_FILES['photo']['name'])) {
                 $up = nm_media_store_image($_FILES['photo'], 'nodes', 'node'.$newId);
@@ -1513,6 +1531,9 @@ if ($_SERVER['REQUEST_METHOD']==='POST') {
             $st->bind_param('sssssssiissssssssi', $dn, $ip, $comm, $ver, $icon, $mask, $gw, $gwif, $gid, $mtype,
                 $a['manufacturer'], $a['model'], $a['serial_number'], $a['asset_tag'], $a['purchase_date'], $a['warranty_expiry'], $a['asset_notes'], $nid);
             $st->execute();
+            // Device Role (classification) — isolated update so it never touches the icon/os detection.
+            if (isset($_POST['device_role']) && function_exists('nm_sw_set_role'))
+                nm_sw_set_role($conn, $nid, (string)$_POST['device_role'] === '' ? 'auto' : (string)$_POST['device_role']);
             // equipment photo: replace (delete old) or remove on request
             $curPhoto = null;
             $pr = $conn->query("SELECT photo_path FROM nm_nodes WHERE id=".(int)$nid." LIMIT 1");
@@ -1687,8 +1708,9 @@ if ($conn->query("SHOW TABLES LIKE 'nm_settings'")->num_rows > 0) {
 }
 function cset($k,$d=''){ global $_cset; return $_cset[$k] ?? $d; }
 $saved  = isset($_GET['saved']);
+if (function_exists('nm_sw_ensure')) nm_sw_ensure($conn);   // ensures the device_role column exists
 $groups = $conn->query("SELECT * FROM nm_groups ORDER BY sort_order,name")->fetch_all(MYSQLI_ASSOC);
-$nodes  = $conn->query("SELECT n.id,n.lnms_device_id,n.display_name,n.ip_address,n.os_icon,
+$nodes  = $conn->query("SELECT n.id,n.lnms_device_id,n.display_name,n.ip_address,n.os_icon,n.hw_model,n.device_role,
     n.snmp_community,n.snmp_version,n.oid_template_id,n.subnet_mask,n.gateway_node_id,n.gateway_iface_id,n.group_id,n.monitor_type,
     n.photo_path,n.manufacturer,n.model,n.serial_number,n.asset_tag,n.purchase_date,n.warranty_expiry,n.asset_notes,
     n.maintenance_until,n.maintenance_since,n.maintenance_reason,n.maintenance_by,
@@ -2409,6 +2431,22 @@ input:checked+.toggle-slider::before{transform:translateX(20px);}
                                 </select>
                             </div>
                             <div>
+                                <?php
+                                    // Device Role — the poller-safe classification (separate from the icon, which
+                                    // the poller auto-detects/overwrites). 'Auto' infers from model/OS; force it to
+                                    // Switch for a MikroTik SwOS / any L2 box so it lands in the Switch Control Center.
+                                    $curRole = strtolower(trim((string)($nd['device_role'] ?? '')));
+                                    $autoRole = function_exists('nm_sw_role') ? nm_sw_role($nd) : 'snmp';
+                                    $roleOpts = ['' => 'Auto — '.$autoRole.'','switch'=>'Switch','router'=>'Router','server'=>'Server','ap'=>'Access Point','firewall'=>'Firewall','other'=>'Other'];
+                                ?>
+                                <label style="font-size:10px;color:#aaa;text-transform:uppercase;letter-spacing:.7px;display:block;margin-bottom:3px;">Device Role <span style="color:#666;">(classification)</span></label>
+                                <select class="form-select" name="device_role" style="font-size:12px;padding:6px 10px;">
+                                    <?php foreach ($roleOpts as $v=>$l): ?>
+                                    <option value="<?= $v ?>" <?= $curRole===$v?'selected':'' ?>><?= htmlspecialchars($l) ?></option>
+                                    <?php endforeach ?>
+                                </select>
+                            </div>
+                            <div>
                                 <label style="font-size:10px;color:#aaa;text-transform:uppercase;letter-spacing:.7px;display:block;margin-bottom:3px;">Gateway Node <span style="color:#666;">(map link)</span></label>
                                 <select class="form-select" name="gateway_node_id" style="font-size:12px;padding:6px 10px;">
                                     <option value="">— None —</option>
@@ -2603,6 +2641,18 @@ input:checked+.toggle-slider::before{transform:translateX(20px);}
                             <option value="linux">Linux</option>
                             <option value="windows">Windows</option>
                             <option value="cisco">Cisco</option>
+                        </select>
+                    </div>
+                    <div class="form-row">
+                        <label>Device Role <span style="color:#666;font-size:10px;">(classification)</span></label>
+                        <select class="form-select" name="device_role" id="anf-role">
+                            <option value="">Auto (from model / OS)</option>
+                            <option value="switch">Switch</option>
+                            <option value="router">Router</option>
+                            <option value="server">Server</option>
+                            <option value="ap">Access Point</option>
+                            <option value="firewall">Firewall</option>
+                            <option value="other">Other</option>
                         </select>
                     </div>
                 </div>

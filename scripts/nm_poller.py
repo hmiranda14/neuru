@@ -121,17 +121,29 @@ def is_virtual_iface(name):
 
 def snmp_walk(ip, community, snmp_ver, oid, timeout=3):
     """
-    Walk OID subtree using snmpwalk with numeric+quiet output (-Oqn).
+    Walk OID subtree using numeric+quiet output (-Oqn).
     Returns list of {oid, suffix, value} dicts where suffix is the
     portion of the OID after the requested base OID.
+
+    For v2c/v3 we use snmpbulkwalk (GETBULK) instead of plain snmpwalk (GETNEXT):
+    GETNEXT does one round-trip PER OID, so a wide table (e.g. hrStorageTable,
+    ~140 OIDs) over a high-latency link (a remote VPS across the internet) can take
+    >10s and blow the subprocess timeout → 0 rows → silently missing memory/disk/temp
+    metrics (CPU/uptime still work because they're tiny walks). GETBULK batches ~25
+    OIDs per request (~25× fewer round-trips: 10s → ~0.5s on a remote node). Only v1
+    lacks GETBULK, so it stays on snmpwalk. Output format is identical (-Oqn).
     """
     ver  = '1' if snmp_ver == 'v1' else '2c'
     base = oid.lstrip('.')
+    if ver == '1':
+        cmd = ['/usr/bin/snmpwalk', '-v1', '-c', community, '-Oqn',
+               '-t', str(timeout), '-r', '1', ip, oid]
+    else:
+        cmd = ['/usr/bin/snmpbulkwalk', f'-v{ver}', '-c', community, '-Oqn',
+               '-Cr25', '-t', str(timeout), '-r', '1', ip, oid]
     try:
         r = subprocess.run(
-            ['/usr/bin/snmpwalk', f'-v{ver}', '-c', community, '-Oqn',
-             '-t', str(timeout), '-r', '1', ip, oid],
-            capture_output=True, text=True, timeout=timeout * 3
+            cmd, capture_output=True, text=True, timeout=timeout * 3
         )
         result = []
         for line in r.stdout.strip().split('\n'):
@@ -844,6 +856,8 @@ def seed_builtin_templates(cur):
          'Universal standard MIBs. CPU via hrProcessorLoad, memory+disk via hrStorageTable. Works for MikroTik, Linux, Cisco and most SNMP devices.', 1),
         ('MikroTik RouterOS', 'mikrotik',
          'MikroTik enterprise OIDs for temperature, fan speed, and voltage sensors (Mikrotik-MIB::mtxrHlTable).', 1),
+        ('MikroTik SwOS (switch)', 'swos',
+         'MikroTik SwOS switches (CSS/CRS). Per-port stats via IF-MIB (automatic); mtxrHlTable temperature/voltage where the model has sensors. SwOS has no HOST-RESOURCES (no CPU/RAM) — normal for a switch.', 1),
         ('Linux / NET-SNMP', 'linux',
          'UCD-SNMP MIB OIDs for Linux servers running net-snmp (snmpd).', 1),
         ('Cisco IOS / IOS-XE', 'cisco',
@@ -862,6 +876,21 @@ def seed_builtin_templates(cur):
                 ('Board Temp', 'temperature', '.1.3.6.1.4.1.14988.1.1.3.10.0', None, '°C',  0, 0.1, 'mtxrHlBoardTemperature (tenths of °C)', 20),
                 ('Fan Speed',  'custom',      '.1.3.6.1.4.1.14988.1.1.3.14.0', None, 'RPM', 0, 1.0, 'mtxrHlActiveFan (RPM)', 30),
                 ('Voltage',    'custom',      '.1.3.6.1.4.1.14988.1.1.3.8.0',  None, 'V',   0, 0.1, 'mtxrHlVoltage (tenths of V)', 40),
+            ]:
+                cur.execute("""
+                    INSERT IGNORE INTO nm_oid_configs
+                    (template_id,metric_name,metric_type,oid,oid_total,unit,walk,scale,description,sort_order)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                """, (tid, m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8]))
+
+    if 'swos' in tpls:
+        tid = tpls['swos']
+        cur.execute("SELECT COUNT(*) FROM nm_oid_configs WHERE template_id=%s", (tid,))
+        if cur.fetchone()[0] == 0:
+            for m in [
+                ('Board Temp',  'temperature', '.1.3.6.1.4.1.14988.1.1.3.10.0', None, '°C', 0, 0.1, 'mtxrHlBoardTemperature (0 if no sensor)', 10),
+                ('CPU Temp',    'temperature', '.1.3.6.1.4.1.14988.1.1.3.11.0', None, '°C', 0, 0.1, 'mtxrHlCpuTemperature (0 if no sensor)', 20),
+                ('PSU Voltage', 'custom',      '.1.3.6.1.4.1.14988.1.1.3.8.0',  None, 'V',  0, 0.1, 'mtxrHlVoltage (tenths of V)', 30),
             ]:
                 cur.execute("""
                     INSERT IGNORE INTO nm_oid_configs

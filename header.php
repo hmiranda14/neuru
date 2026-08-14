@@ -171,6 +171,7 @@ window.NMLoader=(function(){var L=document.getElementById('nm-loader'),V=documen
             ]],
             'Monitoring' => ['icon'=>'fa-solid fa-gauge-high', 'items'=>[
                 ['__always',      'monitoring_center.php', 'fa-solid fa-gauge-high',       'Monitoring Center'],
+                ['switches',      'switch_center.php', 'fa-solid fa-ethernet',             'Switch Control Center'],
                 ['chaos',         'chaos.php',         'fa-solid fa-burst',                'Chaos Test'],
                 ['cisco_asa',     'cisco_asa.php',     'fa-solid fa-shield-halved',        'Cisco ASA Firewall'],
                 ['cisco',         'cisco.php',         'fa-solid fa-network-wired',        'Cisco Fleet'],
@@ -208,6 +209,7 @@ window.NMLoader=(function(){var L=document.getElementById('nm-loader'),V=documen
                 ['weather',     'weather.php',   'fa-solid fa-hurricane',  'Weather Routing'],
             ]],
             'Healing' => ['icon'=>'fa-solid fa-shield-heart', 'items'=>[
+                ['sentinel',    'sentinel.php',   'fa-solid fa-shield-halved', 'Sentinel Engine'],
                 ['immunity',    'immunity.php',   'fa-solid fa-shield-virus',  'Collective Immunity'],
                 ['deception',   'deception.php',  'fa-solid fa-mask',          'Deception Grid'],
                 ['heal',        'heal.php',       'fa-solid fa-robot',         'Self-Healing'],
@@ -228,6 +230,7 @@ window.NMLoader=(function(){var L=document.getElementById('nm-loader'),V=documen
                 ['mtfw',             'mtfw.php',             'fa-solid fa-shield-halved',  'MikroTik Device Manager'],
                 ['wifi',             'wifi.php',             'fa-solid fa-wifi',           'WiFi Control Center'],
                 ['wireguard',        'wireguard.php',        'fa-solid fa-shield-halved',  'WireGuard Orchestrator'],
+                ['utilities',        'utilities.php',        'fa-solid fa-toolbox',        'NEURU Utilities'],
             ]],
             'Site Configuration' => ['icon'=>'fa-solid fa-sliders', 'items'=>[
                 ['__always',       'site_config.php',    'fa-solid fa-compass',        'Configuration Center'],
