@@ -52,8 +52,17 @@ SQL
 TABLES=$(mysql --protocol=socket -N -u root -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='${NM_DB_NAME}'" 2>/dev/null)
 if [ "${TABLES:-0}" -lt 50 ] && [ -f "$APP/install/neuru-install.sql" ]; then
     echo "[box] importing NEURU schema (first boot)…"
-    mysql --protocol=socket -u root "${NM_DB_NAME}" < "$APP/install/neuru-install.sql" 2>>/var/log/neuru-mariadb.log \
-      && echo "[box] schema imported." || echo "[box] WARNING: schema import had errors (see /var/log/neuru-mariadb.log)"
+    # The schema is a MySQL-8 dump; the embedded DB is MariaDB, which does NOT support the
+    # utf8mb4_0900_* collations (nor MySQL-8-only /*!80xxx*/ clauses). Sanitize on the fly so the
+    # import succeeds on MariaDB. (Without this every CREATE TABLE fails → 0 tables → stuck at
+    # "importing-schema".)
+    sed -E -e 's/utf8mb4_0900_ai_ci/utf8mb4_general_ci/g' \
+           -e 's/utf8mb4_0900_as_cs/utf8mb4_general_ci/g' \
+           -e 's/COLLATE=utf8mb4_0900_[a-z_]+/COLLATE=utf8mb4_general_ci/g' \
+           "$APP/install/neuru-install.sql" \
+      | mysql --protocol=socket -u root --force "${NM_DB_NAME}" 2>>/var/log/neuru-mariadb.log
+    NT=$(mysql --protocol=socket -N -u root -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='${NM_DB_NAME}'" 2>/dev/null)
+    echo "[box] schema import done — ${NT:-0} tables (see /var/log/neuru-mariadb.log for any warnings)."
 fi
 
 # 4) Federation (optional): if this NEURU was deployed FROM a parent NEURU, enrol as its
