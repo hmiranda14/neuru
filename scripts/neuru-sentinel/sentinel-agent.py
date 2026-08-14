@@ -120,6 +120,45 @@ def sniffer():
         except Exception as e:
             log(f"sniff error: {e}; retry in 10s"); time.sleep(10)
 
+# ── TZSP receiver: consume traffic MIRRORED to us from a router (MikroTik /tool sniffer
+#    streaming, Cisco/others via TZSP). Lets one sensor see the WHOLE network's DNS without
+#    a physical SPAN cable — NEURU points the router's mirror stream at this host by IP. ──
+TZSP_PORT = int(os.environ.get("TZSP_PORT", "37008") or 37008)
+
+def _parse_tzsp(data):
+    # TZSP: ver, type, encap(2), then tagged fields until END(0x01); rest = encapsulated frame.
+    if len(data) < 4 or data[1] not in (0, 1): return None
+    i = 4
+    while i < len(data):
+        tag = data[i]
+        if tag == 0x01: return data[i+1:]        # END → inner packet follows
+        if tag == 0x00: i += 1; continue          # PADDING
+        if i + 1 >= len(data): return None
+        i += 2 + data[i+1]                         # typed tag: type+len+data
+    return None
+
+def tzsp_listener():
+    try:
+        from scapy.all import Ether
+    except Exception:
+        return
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        s.bind(("0.0.0.0", TZSP_PORT))
+    except Exception as e:
+        log(f"TZSP bind udp/{TZSP_PORT} failed ({e}) — mirror receive disabled"); return
+    log(f"listening for MIRRORED traffic (TZSP) on udp/{TZSP_PORT}")
+    while True:
+        try:
+            data, _ = s.recvfrom(65535)
+            inner = _parse_tzsp(data)
+            if inner:
+                try: on_packet(Ether(inner))
+                except Exception: pass
+        except Exception:
+            pass
+
 # ── main loop: enrol → pull matrix → report ──────────────────────────────────
 def main():
     if not NEURU_URL or not TOKEN:
@@ -132,6 +171,7 @@ def main():
         log("enroll failed, retry 15s"); time.sleep(15)
 
     threading.Thread(target=sniffer, daemon=True).start()
+    threading.Thread(target=tzsp_listener, daemon=True).start()   # receive router-mirrored DNS
 
     matrix_rev = -1
     while True:
