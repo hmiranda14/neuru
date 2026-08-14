@@ -117,15 +117,15 @@ if (!function_exists('nm_rctr_deploy')) {
             if (!preg_match('/^[A-Za-z_][A-Za-z0-9_]*$/',$k)) continue;
             $step('/container/envs/add list='.$cname.' key='.$k.' value="'.str_replace('"','',$v).'"', 'env '.$k);
         }
-        // For the full box, keep the database on a persistent mount so it survives a container
-        // remove/re-pull (the DB outlives image upgrades). Root-dir alone only survives restarts.
-        $mounts='';
-        if ($isBox) {
-            $step(':if ([:len [/container/mounts/find where name="'.$cname.'-db"]]=0) do={ /container/mounts/add name="'.$cname.'-db" src='.$store.'/'.$cname.'-db dst=/var/lib/mysql }', 'db mount');
-            $mounts=' mounts='.$cname.'-db';
-        }
+        // Fresh CHR: RouterOS needs a tmpdir on disk to extract images (esp. large ones like the
+        // full box) — without it the pull silently fails. Set it once if empty (idempotent).
+        $cfg = nm_rctr_run($ssh, ':put [/container/config/get tmpdir]');
+        if (trim($cfg['out'] ?? '')==='') $step('/container/config/set tmpdir='.$store.'/tmp', 'set tmpdir');
+        // The container's whole writable layer (incl. /var/lib/mysql) lives under root-dir on the
+        // selected storage, so the database persists across restarts. (RouterOS 7.23 rejects a
+        // mounts= that references a not-yet-existing mount; root-dir persistence is enough here.)
         if (!$probe['installed']) {
-            $step('/container/add remote-image='.$image.' interface='.$cname.' root-dir='.$store.'/'.$cname.$mounts.' envlist='.$cname.' start-on-boot=yes logging=yes', 'add container (pulling image…)');
+            $step('/container/add remote-image='.$image.' interface='.$cname.' root-dir='.$store.'/'.$cname.' envlist='.$cname.' start-on-boot=yes logging=yes', 'add container (pulling image…)');
         } else { $log[]='container: already present (reusing)'; }
         $step('/container/start [find where interface='.$cname.']', 'start container');
         if (function_exists('nm_audit')) { try { nm_audit($conn,'router.container.deploy',['target_type'=>'node','target_id'=>$nodeId,'details'=>['image'=>$image,'name'=>$cname]]); } catch (\Throwable $e) {} }
