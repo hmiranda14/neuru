@@ -1,0 +1,15 @@
+# NEURU Sentinel wire sensor. host networking + raw-capture caps so it can watch DNS +
+# IP flows on your segment. Detection only — NEURU does the blocking. Nothing to edit here.
+services:
+  neuru-sentinel:
+    image: ghcr.io/hmiranda14/neuru-sentinel:latest
+    container_name: neuru-sentinel
+    restart: unless-stopped
+    network_mode: host
+    cap_add: ["NET_ADMIN", "NET_RAW"]
+    environment:
+      NEURU_URL: "https://YOUR-NEURU-HOST"
+      SENTINEL_TOKEN: "PASTE-TOKEN"        # NEURU → Sentinel → Deploy
+      # IFACE: "eth0"                      # optional: limit to one interface
+      # VERIFY_TLS: "0"                    # if NEURU uses a self-signed cert
+      POLL_SECONDS: "300"
