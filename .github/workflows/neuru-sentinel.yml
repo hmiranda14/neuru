@@ -1,12 +1,15 @@
 # Copy to .github/workflows/neuru-sentinel.yml. Multi-arch build → GHCR.
 name: neuru-sentinel image
+
 on:
   workflow_dispatch:
   push:
     tags: ["sentinel-v*"]
+
 permissions:
   contents: read
   packages: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -15,7 +18,10 @@ jobs:
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3
-        with: { registry: ghcr.io, username: ${{ github.actor }}, password: ${{ secrets.GITHUB_TOKEN }} }
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
       - uses: docker/build-push-action@v6
         with:
           context: scripts/neuru-sentinel
