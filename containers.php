@@ -200,6 +200,16 @@ if ($api !== '') {
         echo json_encode(['ok'=>(bool)($r['ok']??false),'error'=>$r['error']??'','status'=>$r['status']??0,'id'=>(($r['data']['Id']??'')) ]); exit;
     }
 
+    if ($api === 'router_probe') {
+        // Storage slots + resources for a MikroTik deploy target (drives the storage picker +
+        // the resource note in the deploy modal). Reuses nm_rctr_probe over SSH.
+        $node = (int)($_GET['node'] ?? 0);
+        $p = nm_rctr_probe($conn, $node, 'neuru-box');
+        if (empty($p['ok'])) { echo json_encode(['ok'=>false,'error'=>$p['error']??'probe failed']); exit; }
+        echo json_encode(['ok'=>true,'storage'=>$p['storage_options']??[],'arch'=>$p['arch']??'','mem_mb'=>$p['mem_mb']??0,
+                          'has_container'=>$p['has_container']??false,'has_net'=>!empty($p['free_ip'])]); exit;
+    }
+
     if ($api === 'box_ready') {
         // Live first-boot progress for a freshly-deployed NEURU-in-a-Box: server-side proxy to
         // the new instance's /ready.php (browser can't cross-origin to it). LAN-only by design
@@ -1091,7 +1101,7 @@ if(VIEW==='network'){ refreshNetwork(); loadNetAlerts(); setInterval(loadNetAler
 setInterval(tick, (VIEW==='overview')?10000:(VIEW==='network'?8000:(VIEW==='images'?15000:2500)));
 
 // ─────────────────────────── Deploy wizard ───────────────────────────
-let DPL={tpl:null,templates:[],endpoints:[],host:ENDPOINT,ports:[],env:[],vols:[]};
+let DPL={tpl:null,templates:[],endpoints:[],host:ENDPOINT,ports:[],env:[],vols:[],storage:''};
 function deployStep(n){ ['ds1','ds2','ds3'].forEach((id,i)=>document.getElementById(id).classList.toggle('on',i<n)); }
 async function deployOpen(){
   document.getElementById('dpl-ov').classList.add('show');
@@ -1107,7 +1117,32 @@ function updHostLabel(){
   const ep=DPL.endpoints.find(x=>String(x.id)===String(DPL.host));
   document.getElementById('dpl-host').textContent='Target host: '+(ep?ep.name+(ep.up?'':' (down)'):('endpoint '+DPL.host));
 }
-function onHostChange(){ DPL.host=document.getElementById('dp-host').value; updHostLabel(); }
+function onHostChange(){ DPL.host=document.getElementById('dp-host').value; updHostLabel(); routerPanel(); }
+// MikroTik target (negative endpoint id) → fetch storage slots + resources, render a picker + a
+// pre-flight note. For the full NEURU box this shows whether the CHR is x86 with enough RAM.
+async function routerPanel(){
+  const box=document.getElementById('dp-router'); if(!box) return;
+  const id=+DPL.host; DPL.storage='';
+  if(!(id<0)){ box.innerHTML=''; return; }
+  box.innerHTML='<div style="font-size:12px;color:#889;"><i class="fas fa-circle-notch fa-spin"></i> probing router (storage · resources)…</div>';
+  const p=await fetch('containers.php?api=router_probe&node='+(-id)+'&_='+Date.now()).then(r=>r.json()).catch(()=>null);
+  if(!p||!p.ok){ box.innerHTML=`<div style="font-size:12px;color:#f7a;">Could not probe router${p&&p.error?(': '+esc(p.error)):''}</div>`; return; }
+  const isBox=/neuru-box/.test((document.getElementById('dp-image').value||''));
+  const slots=(p.storage||[]);
+  const opts=slots.map((s,i)=>`<option value="${esc(s)}" ${i===0?'selected':''}>${esc(s)}</option>`).join('')||'<option value="">no mounted storage found</option>';
+  DPL.storage=slots[0]||'';
+  const x86=/x86|amd|86_64/.test(p.arch||''); const ramOk=!p.mem_mb||p.mem_mb>=1500;
+  const warn=isBox?((!x86?`<div style="color:#f77;margin-top:6px;"><i class="fas fa-triangle-exclamation"></i> This CHR is <b>${esc(p.arch||'?')}</b> — the full NEURU box needs <b>x86</b>.</div>`:'')
+      +(!ramOk?`<div style="color:#fc7;margin-top:6px;"><i class="fas fa-triangle-exclamation"></i> Only <b>${p.mem_mb} MB</b> RAM — NEURU needs ≥2 GB.</div>`:'')
+      +((x86&&ramOk)?`<div style="color:#7ee787;margin-top:6px;"><i class="fas fa-circle-check"></i> x86 · ${p.mem_mb?(p.mem_mb+' MB RAM'):'RAM ok'} — good to go.</div>`:'')):'';
+  const netNote=!p.has_net?`<div style="color:#89b;margin-top:6px;font-size:11.5px;"><i class="fas fa-diagram-project"></i> No container network yet — NEURU will auto-create a dedicated bridge + subnet (additive).</div>`:'';
+  box.innerHTML=`<div style="padding:11px 13px;border:1px solid rgba(77,163,255,.3);background:rgba(77,163,255,.07);border-radius:10px;">
+    <div style="display:flex;gap:10px;align-items:center;">
+      <div style="flex:1;"><label style="margin:0;"><i class="fas fa-hard-drive" style="color:#4da3ff;"></i> Router storage (container root-dir)</label>
+        <select id="dp-storage" onchange="DPL.storage=this.value">${opts}</select></div>
+      <div style="font-size:11px;color:#7c828c;align-self:flex-end;padding-bottom:8px;">${esc(p.arch||'')}${p.mem_mb?(' · '+p.mem_mb+' MB'):''}</div>
+    </div>${warn}${netNote}</div>`;
+}
 function deployClose(){ document.getElementById('dpl-ov').classList.remove('show'); }
 async function loadTemplates(){
   deployStep(1); document.getElementById('dpl-title').textContent='Choose a template';
@@ -1155,9 +1190,11 @@ function configForm(){
     </div>
     ${isAgent?'':`<label style="margin-top:8px;">Port mappings <span style="color:#667;">(host : container)</span></label><div id="dp-ports"></div><button class="addbtn" onclick="addPort()">+ port</button>`}
     <label style="margin-top:12px;">Environment variables${isAgent?' <span style="color:#7ee787;">(auto-filled)</span>':''}</label><div id="dp-env"></div><button class="addbtn" onclick="addEnv()">+ variable</button>
+    <div id="dp-router" style="margin-top:12px;"></div>
     <label style="margin-top:12px;">Volumes <span style="color:#667;">(/host : /container)</span></label><div id="dp-vols"></div><button class="addbtn" onclick="addVol()">+ volume</button>
   </div>`;
   renderRows();
+  routerPanel();   // if the target is a MikroTik, show storage picker + resource note
   document.getElementById('dpl-foot').innerHTML=`<button class="ghost" onclick="loadTemplates()"><i class="fas fa-arrow-left"></i> Back</button>
     <button class="ghost" onclick="saveTpl()"><i class="fas fa-floppy-disk"></i> Save as template</button>
     <button class="gobtn" style="margin-left:auto;" onclick="doDeploy()"><i class="fas fa-rocket"></i> Deploy</button>`;
@@ -1186,7 +1223,7 @@ function addEnv(){ DPL.env.push(''); renderRows(); }
 function addVol(){ DPL.vols.push(''); renderRows(); }
 function curSpec(){ return { endpoint:(+DPL.host)||ENDPOINT, name:document.getElementById('dp-name').value.trim(), image:document.getElementById('dp-image').value.trim(),
   restart:document.getElementById('dp-restart').value, ports:DPL.ports.filter(p=>p.host&&p.container), env:DPL.env.filter(Boolean), volumes:DPL.vols.filter(Boolean),
-  tpl:(DPL.tpl?DPL.tpl.id:0) }; }
+  storage:(DPL.storage||''), tpl:(DPL.tpl?DPL.tpl.id:0) }; }
 async function doDeploy(){
   const s=curSpec(); if(!s.image){ alert('Image is required'); return; }
   deployStep(3); document.getElementById('dpl-title').textContent='Deploying…'; document.getElementById('dpl-foot').innerHTML='';
