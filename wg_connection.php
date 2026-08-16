@@ -11,9 +11,18 @@ require_once __DIR__ . '/access_control.php';
 
 if (isset($_GET['api'])) {
     header('Content-Type: application/json; charset=utf-8');
-    if (empty($_SESSION['username']) || !checkAccess($conn, 'net_mon')) { http_response_code(403); echo json_encode(['ok'=>false,'error'=>'unauthorized']); exit; }
     require_once __DIR__ . '/nm_wgconn.php';
     $a = $_GET['api'];
+    // ── Machine-to-machine endpoints (token-gated, NO session) — used by the NEURU that deployed
+    //    this box onto a MikroTik to wire up the native `neuru-brain` WG tunnel automatically. ──
+    if ($a === 'wg_export' || $a === 'wg_router_mode') {
+        $tok = nm_wgconn_setup_token();
+        $hdr = $_SERVER['HTTP_X_NEURU_WG_TOKEN'] ?? ($_GET['token'] ?? '');
+        if ($tok === '' || !hash_equals($tok, (string)$hdr)) { http_response_code(403); echo json_encode(['ok'=>false,'error'=>'bad token']); exit; }
+        if ($a === 'wg_export') { $e = nm_wgconn_export($conn); echo json_encode($e ? ['ok'=>true]+$e : ['ok'=>false,'error'=>'not enrolled yet']); exit; }
+        if ($a === 'wg_router_mode') { $b=json_decode(file_get_contents('php://input'),true)?:[]; $up=!empty($b['up'])||(($_GET['up']??'')==='1'); nm_wgconn_set_router_mode($conn, $up, (string)($b['iface']??($_GET['iface']??''))); echo json_encode(['ok'=>true]); exit; }
+    }
+    if (empty($_SESSION['username']) || !checkAccess($conn, 'net_mon')) { http_response_code(403); echo json_encode(['ok'=>false,'error'=>'unauthorized']); exit; }
     if ($a === 'wg_status') { echo json_encode(['ok'=>true,'state'=>nm_wgconn_state($conn)]); exit; }
     if (function_exists('session_write_close')) @session_write_close();
     if ($a === 'wg_enroll')  { echo json_encode(nm_wgconn_enroll($conn)); exit; }

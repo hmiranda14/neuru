@@ -45,9 +45,31 @@ if (!function_exists('nm_wgconn_dir')) {
             'updated_at'   => _wg_get($conn, 'wg_updated_at', ''),
             'conf_present' => is_file(nm_wgconn_dir() . '/wg0.conf'),
             'writable'     => is_writable(nm_wgconn_dir()),
-            'link_up'      => is_dir('/sys/class/net/wg0'),
+            // link_up = wg0 up in OUR netns (sidecar) OR the tunnel is handled by the host router
+            // (NEURU-in-a-Box on a MikroTik → the deploying NEURU created a native `neuru-brain` WG
+            // interface on the router). Router-mode is set by the deployer via api=wg_router_mode.
+            'link_up'      => is_dir('/sys/class/net/wg0') || _wg_get($conn,'wg_router_mode','0')==='1',
+            'router_mode'  => _wg_get($conn,'wg_router_mode','0')==='1',
         ];
     }
+
+    // Export this NEURU's wg0.conf to the deploying NEURU (for the MikroTik native-WG path). Gated
+    // by a shared setup token the deploy passes as env NEURU_WG_SETUP_TOKEN. Returns null if not
+    // enrolled yet. SECURITY: this returns the tunnel private key — only ever over the LAN, only to a
+    // caller holding the deploy token.
+    function nm_wgconn_export($conn): ?array {
+        $f = nm_wgconn_dir() . '/wg0.conf';
+        if (!is_file($f)) return null;
+        $conf = @file_get_contents($f); if ($conf === false || trim($conf)==='') return null;
+        return ['conf'=>$conf, 'ip'=>_wg_get($conn,'wg_ip','')];
+    }
+    // The deployer tells the box its tunnel is live on the host router (so the UI stops warning).
+    function nm_wgconn_set_router_mode($conn, bool $up, string $iface=''): void {
+        _wg_set($conn,'wg_router_mode', $up?'1':'0');
+        if ($iface!=='') _wg_set($conn,'wg_router_iface',$iface);
+        _wg_set($conn,'wg_updated_at', date('Y-m-d H:i:s'));
+    }
+    function nm_wgconn_setup_token(): string { return (string)(getenv('NEURU_WG_SETUP_TOKEN') ?: ''); }
 
     // POST JSON to the Portal's /v1/wg/* → ['ok'=>bool, 'data'=>?, 'err'=>?]
     function _wg_portal($conn, string $path, array $body): array {

@@ -76,6 +76,100 @@ if (!function_exists('nm_rctr_deploy')) {
         if ($override!=='') $n=$override; else { $base=preg_replace('/:.*/','', $image); $n=substr(strrchr('/'.$base,'/'),1); }
         $n=strtolower(preg_replace('/[^a-z0-9\-]/','-', $n)); return substr(trim($n,'-') ?: 'neuru-app', 0, 24);
     }
+    // ── NEURU brain tunnel on a MikroTik (native RouterOS WireGuard) ──────────────
+    // A NEURU-in-a-Box container can't run its own wg0 (RouterOS gives containers no /dev/net/tun),
+    // so we translate the box's Portal-issued wg0.conf into a NATIVE RouterOS WireGuard interface
+    // named `neuru-brain` + its peer, and NAT so the container reaches the brain and the brain's
+    // callbacks reach the container. 100% ADDITIVE + idempotent + name-scoped: this ONLY ever
+    // touches interfaces/peers/NAT rules named/commented `neuru-brain` — it NEVER enumerates or
+    // modifies any other WireGuard interface the router already has.
+    function nm_rctr_wg_parse(string $conf): array {
+        $o=['priv'=>'','addr'=>'','peer'=>'','endpoint_host'=>'','endpoint_port'=>'','allowed'=>'','keepalive'=>'25'];
+        foreach (preg_split('/\r?\n/', $conf) as $ln) {
+            if (preg_match('/^\s*PrivateKey\s*=\s*(\S+)/i',$ln,$m))   $o['priv']=$m[1];
+            elseif (preg_match('/^\s*Address\s*=\s*([0-9.]+)/i',$ln,$m)) $o['addr']=$m[1];
+            elseif (preg_match('/^\s*PublicKey\s*=\s*(\S+)/i',$ln,$m))  $o['peer']=$m[1];
+            elseif (preg_match('/^\s*Endpoint\s*=\s*([^:]+):(\d+)/i',$ln,$m)) { $o['endpoint_host']=$m[1]; $o['endpoint_port']=$m[2]; }
+            elseif (preg_match('/^\s*AllowedIPs\s*=\s*(.+)/i',$ln,$m))  $o['allowed']=trim($m[1]);
+            elseif (preg_match('/^\s*PersistentKeepalive\s*=\s*(\d+)/i',$ln,$m)) $o['keepalive']=$m[1];
+        }
+        return $o;
+    }
+    function nm_rctr_wg_setup($conn, int $nodeId, string $conf, string $containerIp, string $containerSubnet): array {
+        $x = nm_rctr_ssh($conn,$nodeId); if (empty($x['ok'])) return $x; $ssh=$x['ssh'];
+        $p = nm_rctr_wg_parse($conf);
+        if ($p['priv']==='' || $p['peer']==='' || $p['addr']==='' || $p['endpoint_host']==='')
+            return ['ok'=>false,'error'=>'incomplete wg0.conf (need PrivateKey, Address, Peer PublicKey, Endpoint)'];
+        // pick a listen-port that does NOT collide with any existing WG interface's port
+        $used = nm_rctr_run($ssh, ':foreach w in=[/interface/wireguard/find] do={ :put [/interface/wireguard/get $w listen-port] }');
+        $taken = array_map('intval', preg_split('/\r?\n/', trim($used['out'] ?? '')));
+        $port=13232; while (in_array($port,$taken,true)) $port++;
+        $allowed = $p['allowed'] !== '' ? $p['allowed'] : '0.0.0.0/0';
+        // RouterOS peer takes ONE allowed-address per entry; take the first (the brain subnet).
+        $allow1 = trim(explode(',', $allowed)[0]);
+        $log=[]; $step=function($cmd,$label) use($ssh,&$log){ $r=nm_rctr_run($ssh,$cmd,40); $ok=$r['ok']; $log[]=$label.': '.($ok?'ok':('ERR '.($r['err']??''))); return $r; };
+        // 1) the interface (private key from the box's conf) — created ONLY if absent
+        $step(':if ([:len [/interface/wireguard/find where name="neuru-brain"]]=0) do={ /interface/wireguard/add name=neuru-brain listen-port='.$port.' private-key="'.$p['priv'].'" comment="neuru-brain (NEURU auto — brain tunnel, do not delete)" }', 'wg interface neuru-brain');
+        // 2) the tunnel address (box's assigned IP)
+        $step(':if ([:len [/ip/address/find where interface="neuru-brain"]]=0) do={ /ip/address/add address='.$p['addr'].'/32 interface=neuru-brain }', 'address '.$p['addr']);
+        // 3) the Portal peer — ONLY on our interface
+        $step(':if ([:len [/interface/wireguard/peers/find where interface="neuru-brain"]]=0) do={ /interface/wireguard/peers/add interface=neuru-brain public-key="'.$p['peer'].'" endpoint-address='.$p['endpoint_host'].' endpoint-port='.$p['endpoint_port'].' allowed-address='.$allow1.' persistent-keepalive='.$p['keepalive'].'s comment="neuru-brain" }', 'peer '.$p['endpoint_host']);
+        // 4) container → brain (masquerade the container subnet out the tunnel)
+        $step(':if ([:len [/ip/firewall/nat/find comment="neuru-brain-out"]]=0) do={ /ip/firewall/nat/add chain=srcnat action=masquerade out-interface=neuru-brain src-address='.$containerSubnet.' comment="neuru-brain-out" }', 'nat out');
+        // 5) brain → container (callbacks to the tunnel IP land on the box container, not the router)
+        $step(':if ([:len [/ip/firewall/nat/find comment="neuru-brain-in"]]=0) do={ /ip/firewall/nat/add chain=dstnat dst-address='.$p['addr'].' in-interface=neuru-brain action=dst-nat to-addresses='.$containerIp.' comment="neuru-brain-in" }', 'nat in');
+        // verify: did a handshake happen?
+        sleep(3);
+        $hs = nm_rctr_run($ssh, ':put [/interface/wireguard/peers/get [find where interface="neuru-brain"] last-handshake]');
+        $up = trim($hs['out'] ?? ''); $ok = ($up!=='' && stripos($up,'never')===false && $up!=='0s');
+        if (function_exists('nm_audit')) { try { nm_audit($conn,'router.wg.brain',['target_type'=>'node','target_id'=>$nodeId,'details'=>['iface'=>'neuru-brain','addr'=>$p['addr'],'handshake'=>$up]]); } catch (\Throwable $e) {} }
+        return ['ok'=>true,'interface'=>'neuru-brain','address'=>$p['addr'],'listen_port'=>$port,'handshake'=>$up,'tunnel_up'=>$ok,'log'=>$log];
+    }
+
+    // Fetch the box's wg0.conf THROUGH the router (router→container HTTP, since the container is
+    // behind the router), then create the native neuru-brain tunnel + tell the box it's router-mode.
+    // The box exposes it token-gated (NEURU_WG_SETUP_TOKEN). Returns 'pending' if the box isn't enrolled yet.
+    function nm_rctr_wg_from_box($conn, int $nodeId, string $boxIp, string $token, string $containerSubnet): array {
+        if ($token==='') return ['ok'=>false,'error'=>'no setup token'];
+        $x = nm_rctr_ssh($conn,$nodeId); if (empty($x['ok'])) return $x; $ssh=$x['ssh'];
+        $url = 'http://'.$boxIp.'/wg_connection.php?api=wg_export&token='.$token;
+        $r = nm_rctr_run($ssh, ':do { :local z [/tool/fetch url="'.$url.'" http-method=get output=user as-value]; :put ($z->"data") } on-error={ :put "FETCHERR" }', 30);
+        $body = trim($r['out'] ?? '');
+        if ($body==='' || strpos($body,'FETCHERR')!==false) return ['ok'=>false,'pending'=>true,'error'=>'box not answering yet'];
+        $j = json_decode($body, true);
+        if (!is_array($j) || empty($j['ok']) || empty($j['conf'])) return ['ok'=>false,'pending'=>true,'error'=>'box not enrolled yet'];
+        $setup = nm_rctr_wg_setup($conn, $nodeId, (string)$j['conf'], $boxIp, $containerSubnet);
+        if (empty($setup['ok'])) return $setup;
+        // stop the box's "wg0 down" warning — its tunnel is live on the router now
+        nm_rctr_run($ssh, ':do { /tool/fetch url="http://'.$boxIp.'/wg_connection.php?api=wg_router_mode&up=1&iface=neuru-brain&token='.$token.'" http-method=get output=none } on-error={}; :put ok', 20);
+        return $setup + ['box_ip'=>$boxIp];
+    }
+    // Reconcile loop (called from a cron): for every router-box we deployed, if its brain tunnel isn't
+    // wired yet, try to wire it (the user may have enabled WG on the box after deploy). Idempotent.
+    function nm_rctr_wg_reconcile($conn): array {
+        $done=[]; $r=$conn->query("SELECT setting_val FROM nm_settings WHERE setting_key='rctr_wg_pending' LIMIT 1");
+        $map = ($r && ($v=$r->fetch_row())) ? (json_decode((string)$v[0],true) ?: []) : [];
+        if (!$map) return ['ok'=>true,'wired'=>0];
+        $still=[];
+        foreach ($map as $m) {
+            $res = nm_rctr_wg_from_box($conn,(int)$m['node'],(string)$m['ip'],(string)$m['token'],(string)$m['subnet']);
+            if (!empty($res['ok']) && !empty($res['tunnel_up'])) { $done[]=$m['ip']; }        // wired + handshaking → drop from pending
+            else $still[]=$m;                                                                  // keep trying
+        }
+        try { $st=$conn->prepare("INSERT INTO nm_settings(setting_key,setting_val) VALUES('rctr_wg_pending',?) ON DUPLICATE KEY UPDATE setting_val=VALUES(setting_val)");
+            $sv=json_encode(array_values($still)); $st->bind_param('s',$sv); $st->execute(); $st->close(); } catch (\Throwable $e) {}
+        return ['ok'=>true,'wired'=>count($done),'pending'=>count($still)];
+    }
+    function nm_rctr_wg_remember($conn, int $node, string $ip, string $token, string $subnet): void {
+        try { $r=$conn->query("SELECT setting_val FROM nm_settings WHERE setting_key='rctr_wg_pending' LIMIT 1");
+            $map=($r && ($v=$r->fetch_row()))?(json_decode((string)$v[0],true)?:[]):[];
+            $map=array_values(array_filter($map, fn($m)=>($m['ip']??'')!==$ip));   // de-dup by ip
+            $map[]=['node'=>$node,'ip'=>$ip,'token'=>$token,'subnet'=>$subnet];
+            $st=$conn->prepare("INSERT INTO nm_settings(setting_key,setting_val) VALUES('rctr_wg_pending',?) ON DUPLICATE KEY UPDATE setting_val=VALUES(setting_val)");
+            $sv=json_encode($map); $st->bind_param('s',$sv); $st->execute(); $st->close();
+        } catch (\Throwable $e) {}
+    }
+
     // Deploy $spec (image, name?, env[], storage?) onto the router. Additive + idempotent.
     function nm_rctr_deploy($conn, int $nodeId, array $spec, ?int $uid=null): array {
         @set_time_limit(180);
@@ -129,7 +223,17 @@ if (!function_exists('nm_rctr_deploy')) {
         } else { $log[]='container: already present (reusing)'; }
         $step('/container/start [find where interface='.$cname.']', 'start container');
         if (function_exists('nm_audit')) { try { nm_audit($conn,'router.container.deploy',['target_type'=>'node','target_id'=>$nodeId,'details'=>['image'=>$image,'name'=>$cname]]); } catch (\Throwable $e) {} }
+        // NEURU-in-a-Box brain tunnel: remember this box so the reconcile loop (cron) can auto-wire
+        // its native `neuru-brain` WG on the router the moment WireGuard is enabled on the box — the
+        // user never touches RouterOS. (The box can't run its own wg0: RouterOS gives it no TUN.)
+        $wgNote='';
+        if ($isBox) {
+            $wgTok=''; foreach ((array)($spec['env'] ?? []) as $e) { if (strpos($e,'NEURU_WG_SETUP_TOKEN=')===0) { $wgTok=substr($e,21); break; } }
+            $subnet=preg_replace('/\.\d+$/','.0/'.$pfx,$ip);
+            if ($wgTok!=='') { nm_rctr_wg_remember($conn,$nodeId,$ip,$wgTok,$subnet);
+                $wgNote=' The brain WireGuard tunnel will auto-configure on the router (neuru-brain) once you enable WireGuard on the box.'; }
+        }
         return ['ok'=>true,'router'=>$probe['router'],'name'=>$cname,'container_ip'=>$ip,'bridge'=>$bridge,'storage'=>$store,'log'=>$log,
-                'note'=>'Image is pulling on the router (~1-2 min).'];
+                'note'=>'Image is pulling on the router (~1-2 min).'.$wgNote];
     }
 }

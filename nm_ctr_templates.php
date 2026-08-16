@@ -116,13 +116,18 @@ function nm_ctr_seed($conn): void {
     // makes the new instance a slave by default (clear them in the modal for a standalone box).
     $nports = json_encode(['80/tcp'=>'80','443/tcp'=>'443']);
     $nvols  = json_encode(['neuru_db:/var/lib/mysql']);
-    $nenv   = json_encode(['TZ=America/Puerto_Rico','NEURU_ADMIN_PASS=admin@1.one','NEURU_MASTER_URL=__FED__','NEURU_MASTER_TOKEN=__FED__']);
+    $nenv   = json_encode(['TZ=America/Puerto_Rico','NEURU_ADMIN_PASS=admin@1.one','NEURU_MASTER_URL=__FED__','NEURU_MASTER_TOKEN=__FED__','NEURU_WG_SETUP_TOKEN=__FED__']);
     if ($nb = $conn->prepare("INSERT IGNORE INTO nm_ctr_templates
             (name,category,image,description,icon,ports_json,env_json,volumes_json,restart,is_builtin,pid_mode,network_mode)
             VALUES ('NEURU (full platform)','NEURU','ghcr.io/hmiranda14/neuru-box:latest',
                     'The WHOLE NEURU platform in one container (Apache+PHP+MariaDB+pollers) — deploy on Pi/Ubuntu or a MikroTik x86 CHR. First boot self-initializes the DB + schema.',
                     'fa-solid fa-dragon',?,?,?,'unless-stopped',1,'','')")) {
         $nb->bind_param('sss', $nports, $nenv, $nvols); $nb->execute(); $nb->close();
+    }
+    // Refresh the builtin box env/ports/volumes to the current code definition (INSERT IGNORE above
+    // won't update an existing row → newer env like NEURU_WG_SETUP_TOKEN would never propagate).
+    if ($nu = $conn->prepare("UPDATE nm_ctr_templates SET env_json=?,ports_json=?,volumes_json=? WHERE image='ghcr.io/hmiranda14/neuru-box:latest' AND is_builtin=1")) {
+        $nu->bind_param('sss', $nenv, $nports, $nvols); $nu->execute(); $nu->close();
     }
 
     // ── NEURU Sentinel — wire threat sensor (host net + NET_RAW for capture) ──
@@ -185,7 +190,15 @@ function nm_ctr_neuru_fed($conn): array {
             $st=$conn->prepare("INSERT INTO nm_settings(setting_key,setting_val) VALUES('federation_enroll_token',?) ON DUPLICATE KEY UPDATE setting_val=VALUES(setting_val)");
             $st->bind_param('s',$tok); $st->execute(); $st->close(); }
     } catch (\Throwable $e) {}
-    return ['NEURU_MASTER_URL'=>$host?($scheme.'://'.$host):'', 'NEURU_MASTER_TOKEN'=>$tok];
+    // shared WG-setup token so the deploying NEURU can pull the box's wg0.conf back (router native WG)
+    $wgt='';
+    try { $r=$conn->query("SELECT setting_val FROM nm_settings WHERE setting_key='rctr_wg_setup_token' LIMIT 1");
+        if ($r && ($v=$r->fetch_row())) $wgt=(string)$v[0];
+        if ($wgt===''){ $wgt='neu_wg_'.bin2hex(random_bytes(20));
+            $st=$conn->prepare("INSERT INTO nm_settings(setting_key,setting_val) VALUES('rctr_wg_setup_token',?) ON DUPLICATE KEY UPDATE setting_val=VALUES(setting_val)");
+            $st->bind_param('s',$wgt); $st->execute(); $st->close(); }
+    } catch (\Throwable $e) {}
+    return ['NEURU_MASTER_URL'=>$host?($scheme.'://'.$host):'', 'NEURU_MASTER_TOKEN'=>$tok, 'NEURU_WG_SETUP_TOKEN'=>$wgt];
 }
 // Live env for the NEURU Sentinel template (base URL + sentinel enrolment token).
 function nm_ctr_sentinel_env($conn): array {

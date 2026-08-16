@@ -15,4 +15,8 @@ if (!$IS_CLI) {
 }
 $res = nm_wg_poll_all_stats($conn);
 nm_wg_traffic_prune($conn, 14);
-echo $IS_CLI ? ("wg stats: ".json_encode($res)."\n") : json_encode(['ok'=>true,'servers'=>$res,'at'=>date('c')]);
+// NEURU-in-a-Box brain tunnel: auto-wire the native neuru-brain WG on any MikroTik that hosts a box,
+// the moment WireGuard gets enabled on the box (zero RouterOS steps for the user). Best-effort.
+$wgrec = null;
+try { require_once __DIR__ . '/nm_router_ctr.php'; if (function_exists('nm_rctr_wg_reconcile')) $wgrec = nm_rctr_wg_reconcile($conn); } catch (\Throwable $e) {}
+echo $IS_CLI ? ("wg stats: ".json_encode($res)." | brain-reconcile: ".json_encode($wgrec)."\n") : json_encode(['ok'=>true,'servers'=>$res,'brain'=>$wgrec,'at'=>date('c')]);
