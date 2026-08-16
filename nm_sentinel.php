@@ -236,12 +236,14 @@ if (!function_exists('nm_sentinel_ensure')) {
     }
 
     // ── Record a hit + run the configured auto-response ────────────────────────
-    function nm_sentinel_hit($conn, array $h): void {
+    // Returns TRUE only when the hit is actually recorded (so callers count real detections,
+    // not allowlist-filtered false positives).
+    function nm_sentinel_hit($conn, array $h): bool {
         nm_sentinel_ensure($conn);
         // Belt-and-suspenders false-positive guard: never record/block a hit on an allowlisted
         // platform/CDN domain, even if a stale matrix entry or agent slipped one through.
         if (($h['kind'] ?? 'ip')==='domain') { require_once __DIR__.'/nm_immunity.php';
-            if (function_exists('nm_imm_is_safe_domain') && nm_imm_is_safe_domain($conn,(string)$h['remote_indicator'])) return; }
+            if (function_exists('nm_imm_is_safe_domain') && nm_imm_is_safe_domain($conn,(string)$h['remote_indicator'])) return false; }
         $cfg = nm_sentinel_cfg($conn);
         $action = 'alert';
         // VECTOR-SHIELD auto-block the bad indicator (Pi-hole/AdGuard/FW via immunity)
@@ -256,6 +258,7 @@ if (!function_exists('nm_sentinel_ensure')) {
         $li=$h['local_ip']??null; $ri=$h['remote_indicator']; $k=$h['kind']??'ip'; $mod=$h['module']??'spectre';
         $cat=$h['category']??'malware'; $src=$h['source']??'netflow'; $det=substr($h['detail']??'',0,255); $nid=$h['node_id']??null;
         $st->bind_param('ssssssssi',$li,$ri,$k,$mod,$cat,$src,$det,$action,$nid); $st->execute(); $st->close();
+        return true;
     }
 
     // ── Correlate recent NetFlow flows against the matrix (SPECTRE, reuse netflow) ─
@@ -468,9 +471,11 @@ if (!function_exists('nm_sentinel_ensure')) {
         foreach (array_slice($p['hits'] ?? [], 0, 500) as $h) {
             $ind = trim((string)($h['indicator'] ?? '')); if ($ind==='') continue;
             $kind = ($h['kind'] ?? 'ip')==='domain'?'domain':'ip';
-            nm_sentinel_hit($conn, ['local_ip'=>substr((string)($h['local_ip']??''),0,45) ?: null,'remote_indicator'=>substr($ind,0,255),
-                'kind'=>$kind,'module'=>substr((string)($h['module']??'spectre'),0,16),'source'=>'sensor','detail'=>substr((string)($h['detail']??''),0,255),'node_id'=>$node_id]);
-            $n++;
+            // Only count it as "caught" if it was actually recorded — allowlist-filtered false
+            // positives (safe CDN/platform domains) must NOT inflate the sensor's neutralized count.
+            if (nm_sentinel_hit($conn, ['local_ip'=>substr((string)($h['local_ip']??''),0,45) ?: null,'remote_indicator'=>substr($ind,0,255),
+                'kind'=>$kind,'module'=>substr((string)($h['module']??'spectre'),0,16),'source'=>'sensor','detail'=>substr((string)($h['detail']??''),0,255),'node_id'=>$node_id]))
+                $n++;
         }
         if ($n) $conn->query("UPDATE nm_sentinel_nodes SET neutralized=neutralized+".$n." WHERE id=".(int)$node_id);
         return ['ok'=>true,'recorded'=>$n];
