@@ -84,11 +84,12 @@ if (!function_exists('nm_rctr_deploy')) {
     // touches interfaces/peers/NAT rules named/commented `neuru-brain` — it NEVER enumerates or
     // modifies any other WireGuard interface the router already has.
     function nm_rctr_wg_parse(string $conf): array {
-        $o=['priv'=>'','addr'=>'','peer'=>'','endpoint_host'=>'','endpoint_port'=>'','allowed'=>'','keepalive'=>'25'];
+        $o=['priv'=>'','addr'=>'','peer'=>'','psk'=>'','endpoint_host'=>'','endpoint_port'=>'','allowed'=>'','keepalive'=>'25'];
         foreach (preg_split('/\r?\n/', $conf) as $ln) {
             if (preg_match('/^\s*PrivateKey\s*=\s*(\S+)/i',$ln,$m))   $o['priv']=$m[1];
             elseif (preg_match('/^\s*Address\s*=\s*([0-9.]+)/i',$ln,$m)) $o['addr']=$m[1];
             elseif (preg_match('/^\s*PublicKey\s*=\s*(\S+)/i',$ln,$m))  $o['peer']=$m[1];
+            elseif (preg_match('/^\s*PresharedKey\s*=\s*(\S+)/i',$ln,$m)) $o['psk']=$m[1];   // wg-easy issues a PSK — REQUIRED for the handshake
             elseif (preg_match('/^\s*Endpoint\s*=\s*([^:]+):(\d+)/i',$ln,$m)) { $o['endpoint_host']=$m[1]; $o['endpoint_port']=$m[2]; }
             elseif (preg_match('/^\s*AllowedIPs\s*=\s*(.+)/i',$ln,$m))  $o['allowed']=trim($m[1]);
             elseif (preg_match('/^\s*PersistentKeepalive\s*=\s*(\d+)/i',$ln,$m)) $o['keepalive']=$m[1];
@@ -112,8 +113,11 @@ if (!function_exists('nm_rctr_deploy')) {
         $step(':if ([:len [/interface/wireguard/find where name="neuru-brain"]]=0) do={ /interface/wireguard/add name=neuru-brain listen-port='.$port.' private-key="'.$p['priv'].'" comment="neuru-brain (NEURU auto — brain tunnel, do not delete)" }', 'wg interface neuru-brain');
         // 2) the tunnel address (box's assigned IP)
         $step(':if ([:len [/ip/address/find where interface="neuru-brain"]]=0) do={ /ip/address/add address='.$p['addr'].'/32 interface=neuru-brain }', 'address '.$p['addr']);
-        // 3) the Portal peer — ONLY on our interface
-        $step(':if ([:len [/interface/wireguard/peers/find where interface="neuru-brain"]]=0) do={ /interface/wireguard/peers/add interface=neuru-brain public-key="'.$p['peer'].'" endpoint-address='.$p['endpoint_host'].' endpoint-port='.$p['endpoint_port'].' allowed-address='.$allow1.' persistent-keepalive='.$p['keepalive'].'s comment="neuru-brain" }', 'peer '.$p['endpoint_host']);
+        // 3) the Portal peer — ONLY on our interface (create if absent). PSK included when present.
+        $pskAdd = $p['psk']!=='' ? ' preshared-key="'.$p['psk'].'"' : '';
+        $step(':if ([:len [/interface/wireguard/peers/find where interface="neuru-brain"]]=0) do={ /interface/wireguard/peers/add interface=neuru-brain public-key="'.$p['peer'].'" endpoint-address='.$p['endpoint_host'].' endpoint-port='.$p['endpoint_port'].' allowed-address='.$allow1.' persistent-keepalive='.$p['keepalive'].'s'.$pskAdd.' comment="neuru-brain" }', 'peer '.$p['endpoint_host']);
+        // 3b) heal an existing peer to the current conf (endpoint/allowed/PSK can rotate on re-enroll)
+        $step('/interface/wireguard/peers/set [find where interface="neuru-brain"] public-key="'.$p['peer'].'" endpoint-address='.$p['endpoint_host'].' endpoint-port='.$p['endpoint_port'].' allowed-address='.$allow1.($p['psk']!==''?' preshared-key="'.$p['psk'].'"':'').' persistent-keepalive='.$p['keepalive'].'s', 'sync peer + PSK');
         // 4) container → brain (masquerade the container subnet out the tunnel)
         $step(':if ([:len [/ip/firewall/nat/find comment="neuru-brain-out"]]=0) do={ /ip/firewall/nat/add chain=srcnat action=masquerade out-interface=neuru-brain src-address='.$containerSubnet.' comment="neuru-brain-out" }', 'nat out');
         // 5) brain → container (callbacks to the tunnel IP land on the box container, not the router)
