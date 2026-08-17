@@ -17,7 +17,9 @@
 connection.php
 connection-users.php
 net_mon_config_local.php
-nm_config.php
+# nm_config.php — tracked: it carries core functions (nm_node_live_verdict, …) that 10+ pages
+# hard-require, has no secrets (container-standard paths, n8n set via the DB), and already ships in
+# every release. Committing it fixes the git-built NEURU-in-a-Box image (which otherwise lacks it → 500).
 .env
 *.env
 !*.tpl
