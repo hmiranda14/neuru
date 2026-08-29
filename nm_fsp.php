@@ -405,40 +405,81 @@ if (!function_exists('nm_fsp_ensure')) {
     }
 
     // ── Inventory push — POST /assets (upsert on asset_tag, batch ≤200) ─────────
-    // asset_tag is stable per node (NOC-<id>) so a nightly sweep converges, never
-    // clones. Reads results[] and returns per-row rejects (a 201/200 is NOT enough).
+    // FULL sibling-sync: NOC and FSP hold the same record for every node. asset_tag
+    // is stable per node (<prefix>-<id>) so a sweep converges, never clones. We send
+    // EVERYTHING NOC can authoritatively know — name, serial, site, enriched location
+    // (IP + place + city/country), real warranty, criticality — and BACK-FILL what NOC
+    // was missing (a generated-but-unique serial, the default site code) into nm_nodes
+    // so the two portals literally match. We do NOT fabricate commercial data (model_code
+    // must pre-exist in FSP's catalogue; installed/purchase/barcode are human-owned in FSP).
+    // Reads results[] and returns per-row rejects (a 201/200 is NOT enough — §8 trap).
     function nm_fsp_push_inventory($conn, ?array $cfg = null, int $limit = 0): array {
         $cfg = $cfg ?: nm_fsp_cfg($conn);
         if (!nm_fsp_configured($cfg)) return ['ok'=>false, 'err'=>'FSP not configured/enabled'];
         if (!$cfg['inventory'])       return ['ok'=>false, 'err'=>'Inventory push is disabled'];
 
-        // Only nodes with SOMETHING FSP can key on (a serial, or a site code).
         $nodes = [];
-        $q = "SELECT id, display_name, hostname, ip_address, serial_number, manufacturer, model,
-                     fsp_site_code, device_role
-              FROM nm_nodes ORDER BY id" . ($limit > 0 ? " LIMIT " . (int)$limit : "");
+        $q = "SELECT n.id, n.display_name, n.hostname, n.ip_address, n.serial_number, n.manufacturer,
+                     n.model, n.fsp_site_code, n.device_role, n.location, n.warranty_expiry,
+                     g.city, g.country
+              FROM nm_nodes n LEFT JOIN nm_node_geo g ON g.node_id=n.id
+              ORDER BY n.id" . ($limit > 0 ? " LIMIT " . (int)$limit : "");
         if ($r = @$conn->query($q)) while ($x = $r->fetch_assoc()) $nodes[] = $x;
         if (!$nodes) return ['ok'=>true, 'created'=>0, 'updated'=>0, 'rejected'=>0, 'note'=>'no nodes'];
 
-        $created=0; $updated=0; $rejected=0; $rejects=[]; $batchNo=0;
+        $created=0; $updated=0; $rejected=0; $rejects=[]; $batchNo=0; $backfilled=0;
         $today = date('Ymd');
         foreach (array_chunk($nodes, 200) as $chunk) {
             $batchNo++;
             $assets = [];
             foreach ($chunk as $n) {
-                $tag  = $cfg['asset_prefix'] . '-' . (int)$n['id'];   // STABLE identity
+                $id   = (int)$n['id'];
+                $tag  = $cfg['asset_prefix'] . '-' . $id;            // STABLE identity
                 $a = ['asset_tag' => $tag, 'status' => 'installed'];
                 $name = trim((string)($n['display_name'] ?: $n['hostname'] ?: $n['ip_address']));
                 if ($name !== '')                       $a['name'] = mb_substr($name, 0, 120);
-                if (trim((string)$n['serial_number']))  $a['serial_number'] = trim((string)$n['serial_number']);
-                if (trim((string)($n['fsp_site_code'] ?? ''))) $a['site_code'] = trim((string)$n['fsp_site_code']);
-                elseif ($cfg['default_site'] !== '')    $a['site_code'] = $cfg['default_site'];
-                $loc = trim((string)($n['ip_address'] ?? ''));
-                if ($loc !== '')                        $a['location_detail'] = 'IP ' . $loc;
+
+                // Serial: prefer the real one; else generate a unique, stable, clearly-synthetic
+                // one and PERSIST it back to NOC so both siblings carry the same value.
+                $serial = trim((string)$n['serial_number']);
+                if ($serial === '') {
+                    $serial = 'NOCGEN-' . $id;
+                    try { $conn->query("UPDATE nm_nodes SET serial_number='" . $conn->real_escape_string($serial) . "' WHERE id=$id AND (serial_number IS NULL OR serial_number='')"); $backfilled++; } catch (\Throwable $e) {}
+                }
+                $a['serial_number'] = $serial;
+
+                // Site: per-node code, else the configured default — and persist the default
+                // onto the node when it had none, so the Nodes form shows the same site.
+                $site = trim((string)($n['fsp_site_code'] ?? ''));
+                if ($site === '' && $cfg['default_site'] !== '') {
+                    $site = $cfg['default_site'];
+                    try { $conn->query("UPDATE nm_nodes SET fsp_site_code='" . $conn->real_escape_string($site) . "' WHERE id=$id AND (fsp_site_code IS NULL OR fsp_site_code='')"); } catch (\Throwable $e) {}
+                }
+                if ($site !== '') $a['site_code'] = $site;
+
+                // Enriched location_detail: IP · place · city, country (free text — always safe).
+                $locBits = [];
+                if (trim((string)$n['ip_address']) !== '') $locBits[] = 'IP ' . trim((string)$n['ip_address']);
+                if (trim((string)($n['location'] ?? '')) !== '') $locBits[] = trim((string)$n['location']);
+                $place = trim(trim((string)($n['city'] ?? '')) . (trim((string)($n['country'] ?? '')) !== '' ? ', ' . trim((string)$n['country']) : ''), ', ');
+                if ($place !== '') $locBits[] = $place;
+                if ($locBits) $a['location_detail'] = mb_substr(implode(' · ', $locBits), 0, 200);
+
+                // Real warranty only (never fabricated). purchase/installed/barcode/model_code
+                // are human/catalogue-owned in FSP → deliberately omitted.
+                if (preg_match('/^\d{4}-\d{2}-\d{2}$/', (string)($n['warranty_expiry'] ?? ''))) $a['warranty_end_on'] = $n['warranty_expiry'];
+
+                // Criticality from the node's role (safe enum): core network gear = critical.
+                $role = strtolower((string)($n['device_role'] ?? ''));
+                $a['criticality'] = preg_match('/(core|router|firewall|gateway|server)/', $role . ' ' . strtolower($name)) ? 'critical' : 'normal';
+
                 $a['notes'] = 'Discovered by NEURU NOC';
                 $assets[] = $a;
             }
-            $idem = 'sweep-' . $today . '-' . $batchNo;
+            // Idempotency-Key: date + batch + body-hash. A genuine retry (identical body)
+            // replays safely; a changed body (nodes changed, or a manual re-sync) gets a
+            // fresh key instead of a spurious 409 — asset_tag upsert dedupes either way.
+            $idem = 'sweep-' . $today . '-' . $batchNo . '-' . substr(sha1(json_encode($assets)), 0, 10);
             [$code, $data, $err, $corrId] = nm_fsp_http($cfg, 'POST', 'assets', ['assets'=>$assets], $idem);
             if ($code !== 200 && $code !== 201) {
                 return ['ok'=>false, 'err'=>"batch $batchNo failed: " . ($err ?: "HTTP $code"),
@@ -453,6 +494,6 @@ if (!function_exists('nm_fsp_ensure')) {
         }
         // Every reject is logged — a 201 with silent rejects is the trap §8 warns about.
         if ($rejects) nm_fsp_set($conn, 'fsp_last_error', 'inventory rejects: ' . implode(' | ', array_slice($rejects, 0, 20)));
-        return ['ok'=>true, 'created'=>$created, 'updated'=>$updated, 'rejected'=>$rejected, 'rejects'=>$rejects];
+        return ['ok'=>true, 'created'=>$created, 'updated'=>$updated, 'rejected'=>$rejected, 'backfilled'=>$backfilled, 'rejects'=>$rejects];
     }
 }
