@@ -201,7 +201,10 @@ if (!function_exists('nm_inc_collect')) {
         try {
             // defensive cap: AI insights are expired by nm_ai_expire_stale(), but never let a runaway
             // backlog flood the correlation (the container source taught us this the hard way).
-            $r = $conn->query("SELECT id,node_id,kind,severity,title,body,created_at FROM nm_ai_insights WHERE status IN ('open','acknowledged') AND {$sevSql} ORDER BY id DESC LIMIT 800");
+            // Exclude 'fsp_unmapped' — those are NOC↔FSP integration notices (a node has no
+            // FSP identity), NOT device anomalies. Correlating them would loop: the notice
+            // becomes an incident that itself opens an FSP ticket about "couldn't open a ticket".
+            $r = $conn->query("SELECT id,node_id,kind,severity,title,body,created_at FROM nm_ai_insights WHERE status IN ('open','acknowledged') AND kind<>'fsp_unmapped' AND {$sevSql} ORDER BY id DESC LIMIT 800");
             while ($r && $x = $r->fetch_assoc()) $sig[] = ['source'=>'ai','severity'=>nm_inc_norm_sev($x['severity']),
                 'entity'=>null, 'node_id'=>$x['node_id'] ? (int)$x['node_id'] : null, '_kind'=>$x['kind'],
                 'title'=>$x['title'], 'detail'=>$x['body'], 'fingerprint'=>'ai:'.$x['id'],

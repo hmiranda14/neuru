@@ -237,6 +237,14 @@ if (!function_exists('nm_fsp_ensure')) {
 
         [$code, $data, $err, $corrId] = nm_fsp_http($cfg, 'POST', 'calls', $body, $idem);
 
+        // A 409 means this Idempotency-Key was used earlier with a different body (the node's
+        // identity/problem changed since the last attempt). Retry once with a fresh key — the
+        // dedupe_key still guarantees the fault joins its existing call instead of duplicating.
+        if ($code === 409) {
+            try { $nonce = substr(bin2hex(random_bytes(4)), 0, 8); } catch (\Throwable $e) { $nonce = substr(sha1(uniqid('', true)), 0, 8); }
+            [$code, $data, $err, $corrId] = nm_fsp_http($cfg, 'POST', 'calls', $body, $idem . '-' . $nonce);
+        }
+
         if ($code === 200 || $code === 201) {
             nm_fsp_mark($conn, $corr, $dk, $nodeId, [
                 'status'      => 'open',
