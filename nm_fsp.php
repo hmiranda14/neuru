@@ -306,6 +306,17 @@ if (!function_exists('nm_fsp_ensure')) {
         } catch (\Throwable $e) { /* best-effort */ }
     }
 
+    // Per-install salt for generated serials → globally unique across NOC installs.
+    // Generated once, then stable forever (a changed salt would orphan prior serials).
+    function nm_fsp_salt($conn): string {
+        if ($r = @$conn->query("SELECT setting_val FROM nm_settings WHERE setting_key='fsp_serial_salt' LIMIT 1")) {
+            if ($x = $r->fetch_row()) { $v = trim((string)$x[0]); if ($v !== '') return $v; }
+        }
+        try { $salt = substr(bin2hex(random_bytes(4)), 0, 6); } catch (\Throwable $e) { $salt = substr(sha1((string)($_SERVER['SERVER_ADDR'] ?? 'noc') . microtime()), 0, 6); }
+        nm_fsp_set($conn, 'fsp_serial_salt', $salt);
+        return $salt;
+    }
+
     function nm_fsp_set($conn, string $key, string $val): void {
         try { $v = $conn->real_escape_string($val); $k = $conn->real_escape_string($key);
             $conn->query("INSERT INTO nm_settings(setting_key,setting_val) VALUES('$k','$v')
@@ -428,6 +439,7 @@ if (!function_exists('nm_fsp_ensure')) {
         if (!$nodes) return ['ok'=>true, 'created'=>0, 'updated'=>0, 'rejected'=>0, 'note'=>'no nodes'];
 
         $created=0; $updated=0; $rejected=0; $rejects=[]; $batchNo=0; $backfilled=0; $modelRetry=[];
+        $salt = nm_fsp_salt($conn);
         $today = date('Ymd');
         foreach (array_chunk($nodes, 200) as $chunk) {
             $batchNo++;
@@ -440,11 +452,15 @@ if (!function_exists('nm_fsp_ensure')) {
                 if ($name !== '')                       $a['name'] = mb_substr($name, 0, 120);
 
                 // Serial: prefer the real one; else generate a unique, stable, clearly-synthetic
-                // one and PERSIST it back to NOC so both siblings carry the same value.
+                // one and PERSIST it back to NOC so both siblings carry the same value. The
+                // generated serial is namespaced by a per-install salt (NOCGEN-<salt>-<id>) so
+                // it is globally unique — two NEURU NOC installs pushing to ONE FSP never collide,
+                // and it can't clash with stray test data. Empty OR the old unsalted NOCGEN-<id>
+                // format is (re)generated; a REAL serial is never touched.
                 $serial = trim((string)$n['serial_number']);
-                if ($serial === '') {
-                    $serial = 'NOCGEN-' . $id;
-                    try { $conn->query("UPDATE nm_nodes SET serial_number='" . $conn->real_escape_string($serial) . "' WHERE id=$id AND (serial_number IS NULL OR serial_number='')"); $backfilled++; } catch (\Throwable $e) {}
+                if ($serial === '' || preg_match('/^NOCGEN-\d+$/', $serial)) {
+                    $serial = 'NOCGEN-' . $salt . '-' . $id;
+                    try { $conn->query("UPDATE nm_nodes SET serial_number='" . $conn->real_escape_string($serial) . "' WHERE id=$id AND (serial_number IS NULL OR serial_number='' OR serial_number REGEXP '^NOCGEN-[0-9]+$')"); $backfilled++; } catch (\Throwable $e) {}
                 }
                 $a['serial_number'] = $serial;
 
