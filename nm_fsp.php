@@ -427,7 +427,7 @@ if (!function_exists('nm_fsp_ensure')) {
         if ($r = @$conn->query($q)) while ($x = $r->fetch_assoc()) $nodes[] = $x;
         if (!$nodes) return ['ok'=>true, 'created'=>0, 'updated'=>0, 'rejected'=>0, 'note'=>'no nodes'];
 
-        $created=0; $updated=0; $rejected=0; $rejects=[]; $batchNo=0; $backfilled=0;
+        $created=0; $updated=0; $rejected=0; $rejects=[]; $batchNo=0; $backfilled=0; $modelRetry=[];
         $today = date('Ymd');
         foreach (array_chunk($nodes, 200) as $chunk) {
             $batchNo++;
@@ -465,8 +465,15 @@ if (!function_exists('nm_fsp_ensure')) {
                 if ($place !== '') $locBits[] = $place;
                 if ($locBits) $a['location_detail'] = mb_substr(implode(' · ', $locBits), 0, 200);
 
-                // Real warranty only (never fabricated). purchase/installed/barcode/model_code
-                // are human/catalogue-owned in FSP → deliberately omitted.
+                // model_code: send the node's model string as a candidate — FSP fills the
+                // asset's model + CATEGORY from it, but ONLY if that code exists in FSP's model
+                // catalogue; an unknown code rejects the whole row. So we send it optimistically
+                // and SELF-HEAL below: any row FSP rejects for the model is re-sent without it,
+                // so the node still syncs (serial+site+location) and gains its model the moment
+                // an operator catalogues it. purchase/installed/barcode stay human-owned in FSP.
+                if (trim((string)($n['model'] ?? '')) !== '') $a['model_code'] = mb_substr(trim((string)$n['model']), 0, 80);
+
+                // Real warranty only (never fabricated).
                 if (preg_match('/^\d{4}-\d{2}-\d{2}$/', (string)($n['warranty_expiry'] ?? ''))) $a['warranty_end_on'] = $n['warranty_expiry'];
 
                 // Criticality from the node's role (safe enum): core network gear = critical.
@@ -476,6 +483,7 @@ if (!function_exists('nm_fsp_ensure')) {
                 $a['notes'] = 'Discovered by NEURU NOC';
                 $assets[] = $a;
             }
+            $assetByTag = []; foreach ($assets as $aa) $assetByTag[$aa['asset_tag']] = $aa;
             // Idempotency-Key: date + batch + body-hash. A genuine retry (identical body)
             // replays safely; a changed body (nodes changed, or a manual re-sync) gets a
             // fresh key instead of a spurious 409 — asset_tag upsert dedupes either way.
@@ -487,13 +495,35 @@ if (!function_exists('nm_fsp_ensure')) {
             }
             $created += (int)($data['created'] ?? 0);
             $updated += (int)($data['updated'] ?? 0);
-            $rejected+= (int)($data['rejected'] ?? 0);
             foreach ((array)($data['results'] ?? []) as $row) {
-                if (empty($row['ok'])) $rejects[] = ($row['asset_tag'] ?? '?') . ': ' . ($row['error'] ?? 'rejected');
+                if (!empty($row['ok'])) continue;
+                $tag = $row['asset_tag'] ?? '?';
+                $reason = (string)($row['error'] ?? 'rejected');
+                // Self-heal: an uncatalogued model must not sink the whole node. Re-send it
+                // without model_code so serial+site+location still land; log the rest.
+                if (preg_match('/no model has the code/i', $reason) && isset($assetByTag[$tag]['model_code'])) {
+                    $s = $assetByTag[$tag]; unset($s['model_code']); $modelRetry[] = $s;
+                } else {
+                    $rejected++; $rejects[] = $tag . ': ' . $reason;
+                }
             }
         }
+        // Self-heal pass: rows rejected only for an uncatalogued model, re-sent without it.
+        $modelRetry = $modelRetry ?? [];
+        foreach (array_chunk($modelRetry, 200) as $ri => $chunk) {
+            $idem = 'sweep-' . $today . '-nomodel-' . $ri . '-' . substr(sha1(json_encode($chunk)), 0, 10);
+            [$code, $data] = nm_fsp_http($cfg, 'POST', 'assets', ['assets'=>$chunk], $idem);
+            if ($code !== 200 && $code !== 201) { foreach ($chunk as $c) { $rejected++; $rejects[] = $c['asset_tag'] . ': model-retry failed'; } continue; }
+            $created += (int)($data['created'] ?? 0);
+            $updated += (int)($data['updated'] ?? 0);
+            foreach ((array)($data['results'] ?? []) as $row) {
+                if (empty($row['ok'])) { $rejected++; $rejects[] = ($row['asset_tag'] ?? '?') . ': ' . ($row['error'] ?? 'rejected'); }
+            }
+        }
+        $modeled = count($modelRetry);
         // Every reject is logged — a 201 with silent rejects is the trap §8 warns about.
         if ($rejects) nm_fsp_set($conn, 'fsp_last_error', 'inventory rejects: ' . implode(' | ', array_slice($rejects, 0, 20)));
-        return ['ok'=>true, 'created'=>$created, 'updated'=>$updated, 'rejected'=>$rejected, 'backfilled'=>$backfilled, 'rejects'=>$rejects];
+        return ['ok'=>true, 'created'=>$created, 'updated'=>$updated, 'rejected'=>$rejected,
+                'backfilled'=>$backfilled, 'uncatalogued_models'=>$modeled, 'rejects'=>$rejects];
     }
 }
