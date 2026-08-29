@@ -96,3 +96,6 @@
 0 * * * * /var/www/html/netmon/scripts/nm_cron.sh cron_vault.php >/dev/null 2>&1
 */3 * * * * /var/www/html/netmon/scripts/nm_cron.sh cron_sentinel.php >/dev/null 2>&1
 */30 * * * * /opt/netmon-venv/bin/python3 /var/www/html/netmon/scripts/nm_ipam_scan.py >> /home/neuru/netmon-logs/nm_ipam_scan.log 2>&1
+
+# NEURU FSP inventory sweep — push NOC nodes into FSP installed base (daily 03:15; no-op unless enabled)
+15 3 * * * /var/www/html/netmon/scripts/nm_cron.sh cron_fsp_inventory.php >/dev/null 2>&1

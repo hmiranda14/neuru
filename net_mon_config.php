@@ -29,6 +29,7 @@ function nm_cfg_read_asset(array $src): array {
         'purchase_date'   => $d('purchase_date'),
         'warranty_expiry' => $d('warranty_expiry'),
         'asset_notes'     => (substr(trim((string)($src['asset_notes']??'')),0,2000) ?: null),
+        'fsp_site_code'   => $s('fsp_site_code',60),   // NEURU FSP retailer site for this node
     ];
 }
 
@@ -482,6 +483,25 @@ if (isset($_GET['api'])) {
                 'hostname'  => $json['hostname']    ?? '',
                 'lifecycle' => $json['lifecycle']   ?? '',
                 'cluster'   => $json['cluster_id']  ?? '']);
+            break;
+
+        // ── NEURU FSP: live connection + token-scope test (health + /me) ───────
+        case 'fsp_test':
+            include_once('connection.php');
+            require_once __DIR__ . '/nm_fsp.php';
+            $cfg = nm_fsp_cfg($conn);
+            $b   = json_decode(file_get_contents('php://input'), true) ?? [];
+            if (!empty($b['base_url'])) $cfg['base_url'] = rtrim(trim((string)$b['base_url']), '/');
+            // Use a freshly-typed token if given; else keep the saved (decrypted) one.
+            if (isset($b['token']) && trim((string)$b['token']) !== '') $cfg['token'] = trim((string)$b['token']);
+            echo json_encode(nm_fsp_test($cfg));
+            break;
+
+        // ── NEURU FSP: push NOC inventory now (manual sweep) ───────────────────
+        case 'fsp_inventory_sync':
+            include_once('connection.php');
+            require_once __DIR__ . '/nm_fsp.php';
+            echo json_encode(nm_fsp_push_inventory($conn));
             break;
 
         // ── n8n: save outbound config (base url + api key) ─────────────────────
@@ -1379,6 +1399,8 @@ $conn->query("CREATE TABLE IF NOT EXISTS nm_discovery_candidates(
 // ─── POST handlers ────────────────────────────────────────────────────────────
 if ($_SERVER['REQUEST_METHOD']==='POST') {
     $act = $_POST['action']??'';
+    // Ensure the per-node FSP site-code column exists before any node add/edit writes it.
+    require_once __DIR__ . '/nm_fsp.php'; nm_fsp_ensure($conn);
 
     if ($act==='save_lnms') {
         $cfg=['url'=>rtrim(trim($_POST['lnms_url']??''),'/'),
@@ -1456,6 +1478,29 @@ if ($_SERVER['REQUEST_METHOD']==='POST') {
         header('Location: net_mon_config.php?tab=integrations&saved=1'); exit;
     }
 
+    if ($act==='save_fsp') {
+        require_once __DIR__ . '/nm_secrets.php';
+        $set = function($k,$v) use ($conn){ $v=$conn->real_escape_string($v);
+            $conn->query("INSERT INTO nm_settings(setting_key,setting_val) VALUES('{$k}','{$v}') ON DUPLICATE KEY UPDATE setting_val='{$v}'"); };
+        $set('fsp_enabled', isset($_POST['fsp_enabled']) ? '1' : '0');
+        $set('fsp_base_url', rtrim(trim($_POST['fsp_base_url'] ?? ''), '/'));
+        // Only overwrite the token when a new one is typed (encrypt at rest).
+        $newtok = trim($_POST['fsp_token'] ?? '');
+        if ($newtok !== '') $set('fsp_token', nm_secret_encrypt($newtok));
+        $sev = ($_POST['fsp_trigger_sev'] ?? 'critical') === 'critical,warning' ? 'critical,warning' : 'critical';
+        $set('fsp_trigger_sev', $sev);
+        $set('fsp_caller_name', substr(trim($_POST['fsp_caller_name'] ?? 'NEURU NOC'), 0, 80) ?: 'NEURU NOC');
+        $set('fsp_resolve_recovery', isset($_POST['fsp_resolve_recovery']) ? '1' : '0');
+        $set('fsp_node_only', isset($_POST['fsp_node_only']) ? '1' : '0');
+        $set('fsp_default_site_code', substr(trim($_POST['fsp_default_site_code'] ?? ''), 0, 60));
+        $set('fsp_inventory_enabled', isset($_POST['fsp_inventory_enabled']) ? '1' : '0');
+        $set('fsp_asset_prefix', substr(trim($_POST['fsp_asset_prefix'] ?? 'NOC'), 0, 20) ?: 'NOC');
+        $set('fsp_status', 'ok');  // clear any prior auth_error latch on a fresh save
+        nm_audit($conn, 'config.save_fsp', ['target_type'=>'fsp',
+            'details'=>['enabled'=>isset($_POST['fsp_enabled']),'inventory'=>isset($_POST['fsp_inventory_enabled'])]]);
+        header('Location: net_mon_config.php?tab=integrations&saved=1'); exit;
+    }
+
     if ($act==='add_group') {
         $n = substr(trim($_POST['group_name']??''),0,100);
         $c = preg_match('/^#[0-9a-fA-F]{6}$/',$_POST['group_color']??'') ? $_POST['group_color'] : '#4da3ff';
@@ -1493,10 +1538,10 @@ if ($_SERVER['REQUEST_METHOD']==='POST') {
         if ($dn && $ip) {
             $st = $conn->prepare("INSERT INTO nm_nodes
                 (lnms_device_id,display_name,ip_address,snmp_community,snmp_version,os_icon,subnet_mask,group_id,added_by,monitor_type,
-                 manufacturer,model,serial_number,asset_tag,purchase_date,warranty_expiry,asset_notes)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)");
-            $st->bind_param('issssssiissssssss', $did, $dn, $ip, $comm, $ver, $icon, $mask, $gid, $uid, $mtype,
-                $a['manufacturer'], $a['model'], $a['serial_number'], $a['asset_tag'], $a['purchase_date'], $a['warranty_expiry'], $a['asset_notes']);
+                 manufacturer,model,serial_number,asset_tag,purchase_date,warranty_expiry,asset_notes,fsp_site_code)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)");
+            $st->bind_param('issssssiisssssssss', $did, $dn, $ip, $comm, $ver, $icon, $mask, $gid, $uid, $mtype,
+                $a['manufacturer'], $a['model'], $a['serial_number'], $a['asset_tag'], $a['purchase_date'], $a['warranty_expiry'], $a['asset_notes'], $a['fsp_site_code']);
             $st->execute();
             $newId = (int)$conn->insert_id;
             // Device Role classification (poller-safe; isolated from os_icon)
@@ -1527,9 +1572,9 @@ if ($_SERVER['REQUEST_METHOD']==='POST') {
         $a = nm_cfg_read_asset($_POST);
         if ($nid && $dn) {
             $st = $conn->prepare("UPDATE nm_nodes SET display_name=?,ip_address=?,snmp_community=?,snmp_version=?,os_icon=?,subnet_mask=?,gateway_node_id=?,gateway_iface_id=?,group_id=?,monitor_type=?,
-                manufacturer=?,model=?,serial_number=?,asset_tag=?,purchase_date=?,warranty_expiry=?,asset_notes=? WHERE id=?");
-            $st->bind_param('sssssssiissssssssi', $dn, $ip, $comm, $ver, $icon, $mask, $gw, $gwif, $gid, $mtype,
-                $a['manufacturer'], $a['model'], $a['serial_number'], $a['asset_tag'], $a['purchase_date'], $a['warranty_expiry'], $a['asset_notes'], $nid);
+                manufacturer=?,model=?,serial_number=?,asset_tag=?,purchase_date=?,warranty_expiry=?,asset_notes=?,fsp_site_code=? WHERE id=?");
+            $st->bind_param('sssssssiisssssssssi', $dn, $ip, $comm, $ver, $icon, $mask, $gw, $gwif, $gid, $mtype,
+                $a['manufacturer'], $a['model'], $a['serial_number'], $a['asset_tag'], $a['purchase_date'], $a['warranty_expiry'], $a['asset_notes'], $a['fsp_site_code'], $nid);
             $st->execute();
             // Device Role (classification) — isolated update so it never touches the icon/os detection.
             if (isset($_POST['device_role']) && function_exists('nm_sw_set_role'))
@@ -1710,9 +1755,10 @@ function cset($k,$d=''){ global $_cset; return $_cset[$k] ?? $d; }
 $saved  = isset($_GET['saved']);
 if (function_exists('nm_sw_ensure')) nm_sw_ensure($conn);   // ensures the device_role column exists
 $groups = $conn->query("SELECT * FROM nm_groups ORDER BY sort_order,name")->fetch_all(MYSQLI_ASSOC);
+require_once __DIR__ . '/nm_fsp.php'; nm_fsp_ensure($conn);  // ensure n.fsp_site_code column exists before selecting it
 $nodes  = $conn->query("SELECT n.id,n.lnms_device_id,n.display_name,n.ip_address,n.os_icon,n.hw_model,n.device_role,
     n.snmp_community,n.snmp_version,n.oid_template_id,n.subnet_mask,n.gateway_node_id,n.gateway_iface_id,n.group_id,n.monitor_type,
-    n.photo_path,n.manufacturer,n.model,n.serial_number,n.asset_tag,n.purchase_date,n.warranty_expiry,n.asset_notes,
+    n.photo_path,n.manufacturer,n.model,n.serial_number,n.asset_tag,n.purchase_date,n.warranty_expiry,n.asset_notes,n.fsp_site_code,
     n.maintenance_until,n.maintenance_since,n.maintenance_reason,n.maintenance_by,
     g.name grp_name,g.color grp_color
     FROM nm_nodes n LEFT JOIN nm_groups g ON g.id=n.group_id
@@ -2488,6 +2534,7 @@ input:checked+.toggle-slider::before{transform:translateX(20px);}
                             <div><label style="font-size:10px;color:#aaa;">Asset tag</label><input class="form-input" type="text" name="asset_tag" value="<?= htmlspecialchars($nd['asset_tag']??'') ?>" placeholder="NOC-00123" style="font-size:12px;padding:6px 10px;"></div>
                             <div><label style="font-size:10px;color:#aaa;">Purchase date</label><input class="form-input" type="date" name="purchase_date" value="<?= htmlspecialchars($nd['purchase_date']??'') ?>" style="font-size:12px;padding:6px 10px;"></div>
                             <div><label style="font-size:10px;color:#aaa;">Warranty expiry</label><input class="form-input" type="date" name="warranty_expiry" value="<?= htmlspecialchars($nd['warranty_expiry']??'') ?>" style="font-size:12px;padding:6px 10px;"></div>
+                            <div><label style="font-size:10px;color:#5eead4;"><i class="fas fa-headset" style="font-size:9px;"></i> FSP site code</label><input class="form-input" type="text" name="fsp_site_code" value="<?= htmlspecialchars($nd['fsp_site_code']??'') ?>" placeholder="000009-PR" title="NEURU FSP retailer site — service tickets for this node land here when it has no serial" style="font-size:12px;padding:6px 10px;"></div>
                           </div>
                           <div style="margin-top:8px;"><label style="font-size:10px;color:#aaa;">Notes</label><textarea class="form-input" name="asset_notes" rows="2" style="font-size:12px;padding:6px 10px;width:100%;resize:vertical;" placeholder="Rack/location, support contract #, remarks…"><?= htmlspecialchars($nd['asset_notes']??'') ?></textarea></div>
                           <div style="display:flex;align-items:center;gap:14px;margin-top:8px;flex-wrap:wrap;">
@@ -3482,6 +3529,62 @@ function agCopy(id){ var el=document.getElementById(id); el.select(); el.setSele
 <div id="tab-integrations" class="tab-panel <?= $tab==='integrations'?'active':'' ?>">
 <div class="int-masonry">
 <div class="im-col">
+
+<?php
+  // ── NEURU FSP integration settings (Field Service ticketing) ──────────────
+  $_fsp = [];
+  if ($r=$conn->query("SELECT setting_key,setting_val FROM nm_settings WHERE setting_key LIKE 'fsp_%'"))
+      while ($x=$r->fetch_assoc()) $_fsp[$x['setting_key']]=$x['setting_val'];
+  $_fspTokenSet = !empty($_fsp['fsp_token']);
+  $_fspSev = $_fsp['fsp_trigger_sev'] ?? 'critical';
+?>
+<!-- ── NEURU FSP (Field Service Portal) — auto-ticketing ──────────── -->
+<div class="glass-card" style="border-color:rgba(94,234,212,.38);">
+    <h2><i class="fas fa-headset" style="color:#5eead4;"></i> NEURU Field Service <span style="font-size:11px;color:#5eead4;font-weight:400;">(auto-open service tickets)</span></h2>
+    <p style="font-size:11px;color:#888;margin:0 0 12px;">When a node has a problem, NEURU NOC opens a ticket in <b>NEURU FSP</b> automatically — exactly once — and closes it on recovery. Tickets are keyed on each incident's fault identity, so a flapping node makes <b>one</b> ticket (occurrence count rises), not hundreds. Optionally pushes NOC's nodes into FSP's inventory so tickets resolve by serial.</p>
+    <div id="fsp-status" class="conn-status conn-unk" style="margin-bottom:14px;"><i class="fas fa-circle-question"></i> <span id="fsp-status-text">Not tested</span></div>
+    <form method="post" action="net_mon_config.php?tab=integrations">
+        <input type="hidden" name="action" value="save_fsp">
+        <div class="form-row" style="display:flex;gap:10px;align-items:center;">
+            <label style="flex:1;">Enable FSP ticketing</label>
+            <div class="toggle-wrap"><label class="toggle-switch"><input type="checkbox" name="fsp_enabled" <?= ($_fsp['fsp_enabled']??'0')==='1'?'checked':'' ?>><span class="toggle-slider"></span></label></div>
+        </div>
+        <div class="form-row"><label>FSP base URL</label>
+            <input class="form-input" type="text" name="fsp_base_url" value="<?= htmlspecialchars($_fsp['fsp_base_url']??'') ?>" placeholder="https://your-fsp-host/nfsp/api/v1"></div>
+        <div class="form-row"><label>API token <span style="color:#666;font-size:10px;">(<?= $_fspTokenSet?'saved — leave blank to keep':'nfsp_…' ?>)</span></label>
+            <input class="form-input" type="password" name="fsp_token" autocomplete="new-password" placeholder="<?= $_fspTokenSet?'•••••••• (unchanged)':'nfsp_xxxxxxxx' ?>"></div>
+        <div class="form-row" style="display:flex;gap:10px;">
+            <div style="flex:1;"><label>Open tickets for</label>
+                <select class="form-input" name="fsp_trigger_sev">
+                    <option value="critical" <?= $_fspSev==='critical'?'selected':'' ?>>Critical incidents only</option>
+                    <option value="critical,warning" <?= $_fspSev==='critical,warning'?'selected':'' ?>>Critical + Warning</option>
+                </select></div>
+            <div style="flex:1;"><label>Caller name</label>
+                <input class="form-input" type="text" name="fsp_caller_name" value="<?= htmlspecialchars($_fsp['fsp_caller_name']??'NEURU NOC') ?>" placeholder="NEURU NOC"></div>
+        </div>
+        <div class="form-row" style="display:flex;gap:16px;">
+            <label style="display:flex;align-items:center;gap:8px;"><input type="checkbox" name="fsp_resolve_recovery" <?= ($_fsp['fsp_resolve_recovery']??'1')==='1'?'checked':'' ?>> Close ticket on recovery</label>
+            <label style="display:flex;align-items:center;gap:8px;"><input type="checkbox" name="fsp_node_only" <?= ($_fsp['fsp_node_only']??'1')==='1'?'checked':'' ?>> Node incidents only</label>
+        </div>
+        <div class="form-row"><label>Default site code <span style="color:#666;font-size:10px;">(fallback when a node has no serial or per-node site code)</span></label>
+            <input class="form-input" type="text" name="fsp_default_site_code" value="<?= htmlspecialchars($_fsp['fsp_default_site_code']??'') ?>" placeholder="e.g. 000009-PR"></div>
+        <hr style="border:0;border-top:1px solid rgba(255,255,255,.08);margin:14px 0;">
+        <div class="form-row" style="display:flex;gap:10px;align-items:center;">
+            <label style="flex:1;">Push NOC nodes into FSP inventory</label>
+            <div class="toggle-wrap"><label class="toggle-switch"><input type="checkbox" name="fsp_inventory_enabled" <?= ($_fsp['fsp_inventory_enabled']??'0')==='1'?'checked':'' ?>><span class="toggle-slider"></span></label></div>
+        </div>
+        <div class="form-row"><label>Asset tag prefix <span style="color:#666;font-size:10px;">(stable: tag = &lt;prefix&gt;-&lt;node id&gt;)</span></label>
+            <input class="form-input" type="text" name="fsp_asset_prefix" value="<?= htmlspecialchars($_fsp['fsp_asset_prefix']??'NOC') ?>" placeholder="NOC"></div>
+        <div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap;">
+            <button class="btn btn-success btn-sm" type="submit"><i class="fas fa-floppy-disk"></i> Save</button>
+            <button class="btn btn-primary btn-sm" type="button" onclick="fspTest()"><i class="fas fa-plug"></i> Test connection</button>
+            <button class="btn btn-sm" type="button" onclick="fspInvSync()" style="background:rgba(94,234,212,.15);color:#5eead4;"><i class="fas fa-boxes-packing"></i> Sync inventory now</button>
+        </div>
+    </form>
+    <p style="font-size:11px;color:#666;margin:14px 0 0;border-top:1px solid rgba(255,255,255,.06);padding-top:10px;">
+        <i class="fas fa-circle-info"></i> Get a token in FSP → Configuration → API Tokens (scopes: <code>calls.create/view/resolve</code>, <code>assets.view/edit</code>, <code>accounts.view</code>). Per-node FSP site code is set in <b>Nodes → edit</b>. Tickets sync every minute with the incident engine; inventory syncs daily.
+    </p>
+</div>
 
 <?php
   $_alloyPort = ($r=$conn->query("SELECT setting_val FROM nm_settings WHERE setting_key='alloy_port'")) && ($x=$r->fetch_assoc()) ? $x['setting_val'] : '12345';
@@ -5015,6 +5118,30 @@ async function testSmtp(){
     const r=await fetch('net_mon_config.php?api=smtp_test'+(to?('&to='+encodeURIComponent(to)):'')).then(r=>r.json()).catch(()=>({ok:false}));
     box.className=r.ok?'conn-status conn-ok':'conn-status conn-bad';
     txt.innerHTML=r.ok?('<i class="fas fa-check-circle"></i> Test email sent to '+r.to+' — check the inbox.'):('<i class="fas fa-times-circle"></i> '+(r.err||'Failed'));
+}
+// ── NEURU FSP: test connection + token scopes ──────────────────────────────
+async function fspTest(){
+    const box=document.getElementById('fsp-status'), txt=document.getElementById('fsp-status-text');
+    const url=document.querySelector('[name=fsp_base_url]').value.trim();
+    const tok=document.querySelector('[name=fsp_token]').value.trim();  // may be blank → use saved
+    box.className='conn-status conn-unk'; txt.textContent='Testing…';
+    const r=await fetch('net_mon_config.php?api=fsp_test',{method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({base_url:url,token:tok})}).then(r=>r.json()).catch(()=>({ok:false,err:'network error'}));
+    if(!r.ok){ box.className='conn-status conn-bad'; txt.innerHTML='<i class="fas fa-circle-xmark"></i> '+_esc(r.err||'failed'); return; }
+    box.className='conn-status conn-ok';
+    const sc=(r.scopes||[]).join(', ')||'(none)';
+    txt.innerHTML='<i class="fas fa-check-circle"></i> Connected — token <b>'+_esc(r.token||'?')+'</b>'+(r.acts_as?(' ('+_esc(r.acts_as)+')'):'')+' · scopes: '+_esc(sc);
+}
+// ── NEURU FSP: push inventory now ──────────────────────────────────────────
+async function fspInvSync(){
+    const box=document.getElementById('fsp-status'), txt=document.getElementById('fsp-status-text');
+    box.className='conn-status conn-unk'; txt.textContent='Pushing inventory to FSP…';
+    const r=await fetch('net_mon_config.php?api=fsp_inventory_sync').then(r=>r.json()).catch(()=>({ok:false,err:'network error'}));
+    if(!r.ok){ box.className='conn-status conn-bad'; txt.innerHTML='<i class="fas fa-circle-xmark"></i> '+_esc(r.err||'failed'); return; }
+    box.className='conn-status conn-ok';
+    let msg='<i class="fas fa-check-circle"></i> Inventory synced — created '+(r.created||0)+' · updated '+(r.updated||0)+' · rejected '+(r.rejected||0);
+    if((r.rejects||[]).length) msg+='<br><span style="color:#f7a35c;font-size:11px;">rejects: '+_esc(r.rejects.slice(0,5).join(' | '))+'</span>';
+    txt.innerHTML=msg;
 }
 async function syslogStatus(){
     const box=document.getElementById('sy-status'), txt=document.getElementById('sy-status-text');

@@ -217,6 +217,7 @@ if [ -f "$CRONF" ]; then
     ensure_cron cron_vault.php      "0 * * * *"
     ensure_cron cron_update.php     "23 4 * * *"
     ensure_cron cron_license.php    "17 */6 * * *"
+    ensure_cron cron_fsp_inventory.php "15 3 * * *"
     # Python pollers (invoked directly via the venv, NOT nm_cron.sh) that shipped later —
     # self-heal them onto existing installs' persisted cron file too.
     grep -q "nm_ipam_scan.py" "$CRONF" || echo "*/30 * * * * $VENV $APP/scripts/nm_ipam_scan.py >> $LOGS/nm_ipam_scan.log 2>&1" >> "$CRONF"

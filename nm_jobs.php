@@ -53,6 +53,7 @@ if (!function_exists('nm_job_ensure')) {
             'cron_dbmon'       => ['Data Core (DBs)', 'monitor', 0, 'every 1 min', 'Per-target DB probe + live counters.'],
             'cron_netdoc'      => ['Network doc / topology', 'monitor', 0, 'every 10 min', 'Auto-documentation + topology refresh.'],
             'nm_ipam_scan'     => ['IPAM occupancy sweep', 'monitor', 0, 'every 30 min', 'Ping/SNMP-sweeps registered IPAM subnets → real IP occupancy (which addresses are actually in use vs free), incl. unmanaged "in the air" hosts.'],
+            'cron_fsp_inventory' => ['FSP inventory sweep', 'monitor', 0, 'daily 03:15', 'Pushes NOC nodes into NEURU FSP installed base (POST /assets, idempotent upsert). No-op unless FSP + inventory push are enabled. Tickets sync minutely inside Incident correlation.'],
             'cron_cluster'     => ['Federation cluster', 'monitor', 0, 'every 1 min', 'Master/slave federation sync.'],
             'cron_deck'        => ['Stream Deck state', 'monitor', 0, 'every 1 min', 'Pushes state to a connected Stream Deck.'],
             'cron_health'      => ['Predictive health', 'monitor', 0, 'hourly :15', 'Degradation forecasting (SFP/ethernet trends).'],

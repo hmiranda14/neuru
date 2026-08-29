@@ -1,14 +1,15 @@
 <?php
 // ─────────────────────────────────────────────────────────────────────────────
-// NEURU — incident correlation tick. Collects every source's open alerts and
-// correlates them into incidents (root cause + impact + lifecycle). Run minutely:
-//   * * * * * curl -s -H "X-NetMon-Token: <token>" http://localhost/cron_incidents.php
+// NEURU — FSP inventory sweep. Pushes NOC's nodes into NEURU FSP's installed
+// base (POST /assets, upsert on a stable asset_tag) so service tickets resolve
+// by serial. Idempotent — safe to run daily; converges, never clones.
+//   0 3 * * * curl -s -H "X-NetMon-Token: <token>" http://localhost/cron_fsp_inventory.php
+// A disabled/unconfigured FSP integration (or inventory push off) is a no-op.
 // ─────────────────────────────────────────────────────────────────────────────
 $IS_CLI = (PHP_SAPI === 'cli');
 require __DIR__ . '/connection.php';
-require __DIR__ . '/nm_incidents.php';
-require __DIR__ . '/nm_notify.php';
 require __DIR__ . '/nm_n8n.php';
+require __DIR__ . '/nm_fsp.php';
 
 if (!$IS_CLI) {
     header('Content-Type: application/json; charset=utf-8');
@@ -22,16 +23,9 @@ if (!$IS_CLI) {
     }
 }
 
-$r = nm_inc_correlate($conn);
-// notify/escalate right after correlation (best-effort — never break the tick)
-$n = ['sent'=>0];
-try { $n = nm_notify_process($conn); } catch (\Throwable $e) { $n = ['error'=>$e->getMessage()]; }
-
-// NEURU FSP: open/close Field-Service tickets from the incident lifecycle
-// (best-effort — a disabled/unconfigured install is a no-op; never breaks the tick).
-$fsp = ['skipped'=>true];
-try { require_once __DIR__ . '/nm_fsp.php'; $fsp = nm_fsp_sync($conn); } catch (\Throwable $e) { $fsp = ['error'=>$e->getMessage()]; }
+$res = ['ok'=>false, 'skipped'=>true];
+try { $res = nm_fsp_push_inventory($conn); } catch (\Throwable $e) { $res = ['ok'=>false,'err'=>$e->getMessage()]; }
 
 echo $IS_CLI
-    ? "incidents: {$r['signals']} signals → {$r['incidents']} incidents (opened {$r['opened']}, updated {$r['updated']}, resolved {$r['resolved']}) · notify: ".json_encode($n)." · fsp: ".json_encode($fsp)."\n"
-    : json_encode(['ok'=>true] + $r + ['notify'=>$n, 'fsp'=>$fsp, 'at'=>date('c')]);
+    ? "fsp inventory: " . json_encode($res) . "\n"
+    : json_encode(['ok'=>true, 'result'=>$res, 'at'=>date('c')]);
