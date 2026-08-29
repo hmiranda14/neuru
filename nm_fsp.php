@@ -440,6 +440,13 @@ if (!function_exists('nm_fsp_ensure')) {
 
         $created=0; $updated=0; $rejected=0; $rejects=[]; $batchNo=0; $backfilled=0; $modelRetry=[];
         $salt = nm_fsp_salt($conn);
+        // Per-invocation nonce for the Idempotency-Key. Each sweep (a Sync click or the daily
+        // cron) is a NEW logical push → fresh key. A body-hash key looked clever but REPLAYS a
+        // stale answer for 24h when the body is unchanged but FSP state changed (e.g. the site
+        // was just created) — the exact "still rejected after I fixed FSP" trap. Retry-safety is
+        // already guaranteed by the asset_tag upsert (a re-push updates, never duplicates), so
+        // the key only needs to be unique per attempt.
+        try { $runNonce = substr(bin2hex(random_bytes(5)), 0, 10); } catch (\Throwable $e) { $runNonce = substr(sha1(uniqid('', true)), 0, 10); }
         $today = date('Ymd');
         foreach (array_chunk($nodes, 200) as $chunk) {
             $batchNo++;
@@ -503,7 +510,7 @@ if (!function_exists('nm_fsp_ensure')) {
             // Idempotency-Key: date + batch + body-hash. A genuine retry (identical body)
             // replays safely; a changed body (nodes changed, or a manual re-sync) gets a
             // fresh key instead of a spurious 409 — asset_tag upsert dedupes either way.
-            $idem = 'sweep-' . $today . '-' . $batchNo . '-' . substr(sha1(json_encode($assets)), 0, 10);
+            $idem = 'sweep-' . $today . '-' . $batchNo . '-' . $runNonce;
             [$code, $data, $err, $corrId] = nm_fsp_http($cfg, 'POST', 'assets', ['assets'=>$assets], $idem);
             if ($code !== 200 && $code !== 201) {
                 return ['ok'=>false, 'err'=>"batch $batchNo failed: " . ($err ?: "HTTP $code"),
@@ -527,7 +534,7 @@ if (!function_exists('nm_fsp_ensure')) {
         // Self-heal pass: rows rejected only for an uncatalogued model, re-sent without it.
         $modelRetry = $modelRetry ?? [];
         foreach (array_chunk($modelRetry, 200) as $ri => $chunk) {
-            $idem = 'sweep-' . $today . '-nomodel-' . $ri . '-' . substr(sha1(json_encode($chunk)), 0, 10);
+            $idem = 'sweep-' . $today . '-nomodel-' . $ri . '-' . $runNonce;
             [$code, $data] = nm_fsp_http($cfg, 'POST', 'assets', ['assets'=>$chunk], $idem);
             if ($code !== 200 && $code !== 201) { foreach ($chunk as $c) { $rejected++; $rejects[] = $c['asset_tag'] . ': model-retry failed'; } continue; }
             $created += (int)($data['created'] ?? 0);
@@ -538,7 +545,8 @@ if (!function_exists('nm_fsp_ensure')) {
         }
         $modeled = count($modelRetry);
         // Every reject is logged — a 201 with silent rejects is the trap §8 warns about.
-        if ($rejects) nm_fsp_set($conn, 'fsp_last_error', 'inventory rejects: ' . implode(' | ', array_slice($rejects, 0, 20)));
+        // A clean run clears the latch so a stale failure doesn't linger in the UI.
+        nm_fsp_set($conn, 'fsp_last_error', $rejects ? ('inventory rejects: ' . implode(' | ', array_slice($rejects, 0, 20))) : '');
         return ['ok'=>true, 'created'=>$created, 'updated'=>$updated, 'rejected'=>$rejected,
                 'backfilled'=>$backfilled, 'uncatalogued_models'=>$modeled, 'rejects'=>$rejects];
     }
