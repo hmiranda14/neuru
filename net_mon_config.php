@@ -2,6 +2,7 @@
 require_once __DIR__ . '/nm_config.php';
 // ─── LibreNMS config — sourced from the DB (nm_settings), not a web-root file ──
 require_once __DIR__ . '/connection.php';
+require_once __DIR__ . '/nm_maptiles.php';   // shared keyless basemap (CARTO now needs a key)
 require_once __DIR__ . '/nm_lnms.php';
 require_once __DIR__ . '/nm_graylog.php';
 require_once __DIR__ . '/nm_n8n.php';
@@ -1475,6 +1476,21 @@ if ($_SERVER['REQUEST_METHOD']==='POST') {
         nm_graylog_save($conn, $cfg);
         nm_audit($conn, 'config.save_graylog', ['target_type'=>'graylog',
             'details'=>['url'=>$cfg['url'],'enabled'=>$cfg['enabled']]]);
+        header('Location: net_mon_config.php?tab=integrations&saved=1'); exit;
+    }
+
+    if ($act==='save_maps') {
+        $set = function($k,$v) use ($conn){ $v=$conn->real_escape_string($v);
+            $conn->query("INSERT INTO nm_settings(setting_key,setting_val) VALUES('{$k}','{$v}') ON DUPLICATE KEY UPDATE setting_val='{$v}'"); };
+        $prov = in_array($_POST['map_provider']??'', ['esri_dark','esri_imagery','osm_dark','osm','carto','custom'], true) ? $_POST['map_provider'] : 'esri_dark';
+        $set('map_provider', $prov);
+        // Custom provider fields (only meaningful when provider=custom; harmless otherwise).
+        $set('map_tile_url', substr(trim($_POST['map_tile_url'] ?? ''), 0, 400));
+        $set('map_tile_attr', substr(trim($_POST['map_tile_attr'] ?? ''), 0, 300));
+        $set('map_tile_sub', substr(trim($_POST['map_tile_sub'] ?? ''), 0, 20));
+        $set('map_tile_maxnative', (string)max(1, min(22, (int)($_POST['map_tile_maxnative'] ?? 19))));
+        $set('map_tile_filter', isset($_POST['map_tile_filter']) ? '1' : '0');
+        nm_audit($conn, 'config.save_maps', ['target_type'=>'maps','details'=>['provider'=>$prov]]);
         header('Location: net_mon_config.php?tab=integrations&saved=1'); exit;
     }
 
@@ -3587,6 +3603,43 @@ function agCopy(id){ var el=document.getElementById(id); el.select(); el.setSele
 </div>
 
 <?php
+  // Basemap provider (Geo Wall / Command Center / geomap / weather / traceroute maps)
+  $_mapProv = ($r=$conn->query("SELECT setting_val FROM nm_settings WHERE setting_key='map_provider'")) && ($x=$r->fetch_row()) ? $x[0] : 'esri_dark';
+  $_mapUrl  = ($r=$conn->query("SELECT setting_val FROM nm_settings WHERE setting_key='map_tile_url'")) && ($x=$r->fetch_row()) ? $x[0] : '';
+  $_mapAttr = ($r=$conn->query("SELECT setting_val FROM nm_settings WHERE setting_key='map_tile_attr'")) && ($x=$r->fetch_row()) ? $x[0] : '';
+  $_mapSub  = ($r=$conn->query("SELECT setting_val FROM nm_settings WHERE setting_key='map_tile_sub'")) && ($x=$r->fetch_row()) ? $x[0] : '';
+?>
+<!-- ── Basemap / Map tiles (Geo Wall, Command Center, geomap, weather) ──── -->
+<div class="glass-card" style="border-color:rgba(46,204,113,.35);">
+    <h2><i class="fas fa-map-location-dot" style="color:#2ecc71;"></i> Basemap Tiles <span style="font-size:11px;font-weight:400;color:#888;">— Geo Wall · Command Center · maps</span></h2>
+    <p style="font-size:11px;color:#888;margin:0 0 12px;">The map background for <a href="command.php" style="color:var(--accent);">Command Center</a>, <a href="geomap.php" style="color:var(--accent);">Geo Wall</a>, Federation, Weather &amp; Traceroute. <b>CARTO began requiring an API key</b> (watermarking maps) — the default is now <b>Esri Dark Gray</b>, a keyless dark basemap. Switch it here anytime.</p>
+    <form method="post" action="net_mon_config.php?tab=integrations">
+        <input type="hidden" name="action" value="save_maps">
+        <div class="form-row"><label>Provider</label>
+            <select class="form-input" name="map_provider" id="map_provider" onchange="document.getElementById('map-custom').style.display=this.value==='custom'?'block':'none'">
+                <option value="esri_dark"    <?= $_mapProv==='esri_dark'?'selected':'' ?>>Esri Dark Gray — keyless, dark (recommended)</option>
+                <option value="esri_imagery" <?= $_mapProv==='esri_imagery'?'selected':'' ?>>Esri Satellite (World Imagery) — keyless</option>
+                <option value="osm_dark"     <?= $_mapProv==='osm_dark'?'selected':'' ?>>OpenStreetMap — dark (CSS filter), keyless</option>
+                <option value="osm"          <?= $_mapProv==='osm'?'selected':'' ?>>OpenStreetMap — light, keyless</option>
+                <option value="carto"        <?= $_mapProv==='carto'?'selected':'' ?>>CARTO dark (needs an API key — watermarked without one)</option>
+                <option value="custom"       <?= $_mapProv==='custom'?'selected':'' ?>>Custom URL (bring your own key: Mapbox/CARTO/…)</option>
+            </select>
+        </div>
+        <div id="map-custom" style="display:<?= $_mapProv==='custom'?'block':'none' ?>;">
+            <div class="form-row"><label>Tile URL template</label>
+                <input class="form-input" type="text" name="map_tile_url" value="<?= htmlspecialchars($_mapUrl) ?>" placeholder="https://{s}.tiles.example/{z}/{x}/{y}.png?key=YOURKEY"></div>
+            <div class="form-row" style="display:flex;gap:10px;">
+                <div style="flex:2;"><label>Attribution</label><input class="form-input" type="text" name="map_tile_attr" value="<?= htmlspecialchars($_mapAttr) ?>" placeholder="© Provider"></div>
+                <div style="flex:1;"><label>Subdomains</label><input class="form-input" type="text" name="map_tile_sub" value="<?= htmlspecialchars($_mapSub) ?>" placeholder="abcd"></div>
+                <div style="flex:1;"><label>Max native zoom</label><input class="form-input" type="number" name="map_tile_maxnative" value="19" min="1" max="22"></div>
+            </div>
+            <label style="display:flex;align-items:center;gap:8px;font-size:12px;"><input type="checkbox" name="map_tile_filter"> Apply dark CSS filter (for a light provider)</label>
+        </div>
+        <button class="btn btn-success btn-sm" type="submit" style="margin-top:10px;"><i class="fas fa-floppy-disk"></i> Save basemap</button>
+    </form>
+</div>
+
+<?php
   $_alloyPort = ($r=$conn->query("SELECT setting_val FROM nm_settings WHERE setting_key='alloy_port'")) && ($x=$r->fetch_assoc()) ? $x['setting_val'] : '12345';
   $_alloyPath = ($r=$conn->query("SELECT setting_val FROM nm_settings WHERE setting_key='alloy_path'")) && ($x=$r->fetch_assoc()) ? $x['setting_val'] : '/metrics';
 ?>
@@ -4713,7 +4766,7 @@ function pickOnMap(btn){
     setTimeout(()=>{
         if(!_pmMap){
             _pmMap=L.map('pm-map').setView(c,has?13:11);
-            L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',{subdomains:'abcd',maxZoom:19}).addTo(_pmMap);
+            <?= nm_map_tile_js($conn) ?>.addTo(_pmMap);
             _pmMap.on('click',e=>pmSet(e.latlng.lat,e.latlng.lng));
         } else { _pmMap.setView(c,has?13:11); }
         _pmMap.invalidateSize();

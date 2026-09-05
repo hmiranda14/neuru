@@ -7,6 +7,7 @@
 date_default_timezone_set('America/Puerto_Rico');
 include('check.php');
 include('connection.php');
+require_once __DIR__.'/nm_maptiles.php';   // shared keyless basemap (CARTO now needs a key)
 require_once('access_control.php');
 require_once('nm_chrome.php');
 require_once('nm_nettools.php');
@@ -84,7 +85,7 @@ let map, layer;
 function esc(s){ return (s==null?'':String(s)).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
 function initMap(){
   map=L.map('map',{worldCopyJump:true}).setView([20,0],2);
-  L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',{attribution:'© OpenStreetMap, © CARTO',subdomains:'abcd',maxZoom:19}).addTo(map);
+  <?= nm_map_tile_js($conn) ?>.addTo(map);
   layer=L.layerGroup().addTo(map);
 }
 async function trace(){

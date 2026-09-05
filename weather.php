@@ -6,6 +6,7 @@
 date_default_timezone_set('America/Puerto_Rico');
 include('check.php');
 include('connection.php');
+require_once __DIR__.'/nm_maptiles.php';   // shared keyless basemap (CARTO now needs a key)
 require_once('access_control.php');
 require_once('nm_chrome.php');
 require_once('nm_weather.php');
@@ -158,7 +159,7 @@ function sevColor(s){ s=(s||'').toLowerCase(); if(s==='extreme'||s==='severe')re
 function renderMap(r){
   const host=document.getElementById('wx-map'); if(!host||!window.L) return;
   if(!WXMAP){ WXMAP=L.map('wx-map',{worldCopyJump:true,zoomControl:true,attributionControl:false,preferCanvas:true}).setView([18.4,-66.1],7);
-    L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',{subdomains:'abcd',maxZoom:19}).addTo(WXMAP); WXLAYER=L.layerGroup().addTo(WXMAP); }
+    <?= nm_map_tile_js($conn) ?>.addTo(WXMAP); WXLAYER=L.layerGroup().addTo(WXMAP); }
   WXLAYER.clearLayers();
   const threat={}; (r.threatened||[]).forEach(t=>{ threat[t.node_id]=t; });
   const geo=(r.geo||[]).filter(g=>g.lat!=null&&g.lon!=null); const pts=[];

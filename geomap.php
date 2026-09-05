@@ -8,6 +8,7 @@
 date_default_timezone_set('America/Puerto_Rico');
 include('check.php');
 include('connection.php');
+require_once __DIR__.'/nm_maptiles.php';   // shared keyless basemap (CARTO now needs a key)
 require_once('access_control.php');
 require_once('nm_geomap.php');
 include('logger.php');
@@ -122,7 +123,7 @@ document.addEventListener('fullscreenchange',()=>{
 
 function initMap(){
   map=L.map('map',{worldCopyJump:true,zoomControl:true,attributionControl:false,preferCanvas:true}).setView([18.4,-66.1],7);
-  L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',{subdomains:'abcd',maxZoom:19}).addTo(map);
+  <?= nm_map_tile_js($conn) ?>.addTo(map);
   fx=document.getElementById('fx'); ctx=fx.getContext('2d');
   const ro=()=>{ const w=document.getElementById('mapwrap'); fx.width=w.clientWidth; fx.height=w.clientHeight; dirty=true; };
   window.addEventListener('resize',ro); setTimeout(()=>{map.invalidateSize();ro();},150);

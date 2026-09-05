@@ -9,6 +9,7 @@
 date_default_timezone_set('America/Puerto_Rico');
 include('check.php');
 include('connection.php');
+require_once __DIR__.'/nm_maptiles.php';   // shared keyless basemap (CARTO now needs a key)
 require_once('access_control.php');
 require_once('nm_chrome.php');
 require_once('nm_cluster.php');
@@ -660,7 +661,7 @@ async function clusterBlock(){ const ind=document.getElementById('im-ind').value
 let FED_MAP=null, FED_MK={}, FED_LAYER=null;
 function initFedMap(){ if(FED_MAP){ setTimeout(()=>FED_MAP.invalidateSize(),60); return; }
   FED_MAP=L.map('fed-map',{worldCopyJump:true,zoomControl:true,attributionControl:false,preferCanvas:true}).setView([18.4,-66.1],7);
-  L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',{subdomains:'abcd',maxZoom:19}).addTo(FED_MAP);
+  <?= nm_map_tile_js($conn) ?>.addTo(FED_MAP);
   FED_LAYER=L.layerGroup().addTo(FED_MAP);
 }
 function siteColor(s){ if(s.status==='offline'||s.status==='never')return '#7c8698'; if(s.nodes.down>0||s.incidents.critical>0)return '#ff5a5a'; if(s.status==='stale'||s.nodes.degraded>0||s.incidents.open>0)return '#f0a92c'; return '#2ee66e'; }

@@ -112,6 +112,7 @@ if (isset($_GET['api']) || isset($_POST['api'])) {
 
 // ── HTML page ────────────────────────────────────────────────────────────────
 include('check.php');
+require_once __DIR__.'/nm_maptiles.php';   // shared keyless basemap (CARTO now needs a key)
 if (!checkAccess($conn, 'command')) { header('Location: /denied_access.php?page=command'); exit; }
 nm_cmd_ensure($conn);
 require_once __DIR__ . '/logger.php';
@@ -363,7 +364,7 @@ let LAYOUT={};   // id => {on, x, y, collapsed}
 /* ── Map + animation (reuses the Geo Wall engine) ── */
 function initMap(){
   map=L.map('cc-map',{worldCopyJump:true,zoomControl:true,attributionControl:false,preferCanvas:true}).setView([18.4,-66.1],6);
-  L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',{subdomains:'abcd',maxZoom:19}).addTo(map);
+  <?= nm_map_tile_js($conn) ?>.addTo(map);
   fx=document.getElementById('cc-fx'); ctx=fx.getContext('2d');
   const ro=()=>{ const s=document.getElementById('cc-stage'); fx.width=s.clientWidth; fx.height=s.clientHeight; DIRTY=true; map.invalidateSize(); };
   window.addEventListener('resize',ro); setTimeout(ro,160);
