@@ -72,7 +72,7 @@ if (!function_exists('nm_fsp_ensure')) {
     // ── Config ────────────────────────────────────────────────────────────────
     // All settings live in nm_settings; the bearer token is encrypted at rest.
     function nm_fsp_cfg($conn): array {
-        $keys = ['fsp_enabled','fsp_base_url','fsp_token','fsp_trigger_sev','fsp_caller_name',
+        $keys = ['fsp_enabled','fsp_base_url','fsp_web_url','fsp_token','fsp_trigger_sev','fsp_caller_name',
                  'fsp_resolve_recovery','fsp_node_only','fsp_default_site_code',
                  'fsp_inventory_enabled','fsp_asset_prefix','fsp_last_error','fsp_status'];
         $in  = "'" . implode("','", $keys) . "'";
@@ -86,6 +86,7 @@ if (!function_exists('nm_fsp_ensure')) {
         return [
             'enabled'          => ($c['fsp_enabled'] ?? '0') === '1',
             'base_url'         => rtrim((string)($c['fsp_base_url'] ?? ''), '/'),
+            'web_url'          => rtrim((string)($c['fsp_web_url'] ?? ''), '/'),
             'token'            => $token,
             'trigger_sev'      => $sev === '' ? ['critical'] : array_map('trim', explode(',', strtolower($sev))),
             'caller_name'      => trim((string)($c['fsp_caller_name'] ?? '')) ?: 'NEURU NOC',

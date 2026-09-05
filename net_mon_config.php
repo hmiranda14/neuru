@@ -1500,6 +1500,7 @@ if ($_SERVER['REQUEST_METHOD']==='POST') {
             $conn->query("INSERT INTO nm_settings(setting_key,setting_val) VALUES('{$k}','{$v}') ON DUPLICATE KEY UPDATE setting_val='{$v}'"); };
         $set('fsp_enabled', isset($_POST['fsp_enabled']) ? '1' : '0');
         $set('fsp_base_url', rtrim(trim($_POST['fsp_base_url'] ?? ''), '/'));
+        $set('fsp_web_url',  rtrim(trim($_POST['fsp_web_url'] ?? ''), '/'));   // public portal link for the Command Deck
         // Only overwrite the token when a new one is typed (encrypt at rest).
         $newtok = trim($_POST['fsp_token'] ?? '');
         if ($newtok !== '') $set('fsp_token', nm_secret_encrypt($newtok));
@@ -3565,8 +3566,10 @@ function agCopy(id){ var el=document.getElementById(id); el.select(); el.setSele
             <label style="flex:1;">Enable FSP ticketing</label>
             <div class="toggle-wrap"><label class="toggle-switch"><input type="checkbox" name="fsp_enabled" <?= ($_fsp['fsp_enabled']??'0')==='1'?'checked':'' ?>><span class="toggle-slider"></span></label></div>
         </div>
-        <div class="form-row"><label>FSP base URL</label>
-            <input class="form-input" type="text" name="fsp_base_url" value="<?= htmlspecialchars($_fsp['fsp_base_url']??'') ?>" placeholder="https://your-fsp-host/nfsp/api/v1"></div>
+        <div class="form-row"><label>FSP API base URL <span style="color:#666;font-size:10px;">(how NEURU talks to FSP — usually the LOCAL/internal address)</span></label>
+            <input class="form-input" type="text" name="fsp_base_url" value="<?= htmlspecialchars($_fsp['fsp_base_url']??'') ?>" placeholder="http://192.168.0.240:9191/nfsp/api/v1"></div>
+        <div class="form-row"><label>Field Service portal link <span style="color:#666;font-size:10px;">(PUBLIC URL a person opens — shown on the Command Deck when enabled)</span></label>
+            <input class="form-input" type="text" name="fsp_web_url" value="<?= htmlspecialchars($_fsp['fsp_web_url']??'') ?>" placeholder="https://nfsp.example.com/nfsp"></div>
         <div class="form-row"><label>API token <span style="color:#666;font-size:10px;">(<?= $_fspTokenSet?'saved — leave blank to keep':'nfsp_…' ?>)</span></label>
             <input class="form-input" type="password" name="fsp_token" autocomplete="new-password" placeholder="<?= $_fspTokenSet?'•••••••• (unchanged)':'nfsp_xxxxxxxx' ?>"></div>
         <div class="form-row" style="display:flex;gap:10px;">

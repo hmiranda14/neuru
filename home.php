@@ -60,6 +60,18 @@ if ($api === 'vitals') {
 
 log_user_action($conn, 'view_page', 'home.php');
 
+// NEURU Field Service — show a Command-Deck link ONLY when FSP is enabled AND a
+// public portal URL is set (the human-facing link, separate from the local API base).
+$fspShow = false; $fspWeb = '';
+if ($r = $conn->query("SELECT setting_key,setting_val FROM nm_settings WHERE setting_key IN ('fsp_enabled','fsp_web_url')")) {
+    $on = false;
+    while ($x = $r->fetch_assoc()) {
+        if ($x['setting_key'] === 'fsp_enabled') $on = ($x['setting_val'] === '1');
+        else $fspWeb = trim((string)$x['setting_val']);
+    }
+    $fspShow = $on && $fspWeb !== '';
+}
+
 // ── Build the RBAC-filtered app grid from the permission catalog ─────────────
 $catalog = nm_perm_catalog();
 $CAT_ORDER = ['Command Centers','Monitoring','AI Tools','Ext Monitoring','Healing','Gaming','Net Tools','Device Tools','Logs & AI','Infrastructure','Site Configuration','Administration'];
@@ -278,6 +290,9 @@ html{ background:#05080f; } body{ margin:0; font-family:'Segoe UI',Tahoma,sans-s
       <button data-v="grid" onclick="setView('grid')"><i class="fa-solid fa-table-cells-large"></i> Grid</button>
     </div>
     <button class="tbtn" id="tourbtn" onclick="toggleTour()" title="Auto-glide through the sections"><i class="fa-solid fa-play"></i> Auto-tour</button>
+<?php if ($fspShow): ?>
+    <a class="tbtn" href="<?= htmlspecialchars($fspWeb) ?>" target="_blank" rel="noopener" title="Open NEURU Field Service" style="text-decoration:none;color:#5eead4;border-color:rgba(94,234,212,.4);"><i class="fa-solid fa-headset"></i> Field Service <i class="fa-solid fa-arrow-up-right-from-square" style="font-size:9px;opacity:.7;"></i></a>
+<?php endif; ?>
   </div>
 
   <!-- DECK (carousel) -->
